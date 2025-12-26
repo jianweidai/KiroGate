@@ -25,6 +25,7 @@
 """
 
 import json
+import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from fastapi import HTTPException, Request, Response
@@ -47,6 +48,7 @@ from kiro_gateway.streaming import (
 )
 from kiro_gateway.utils import generate_conversation_id, get_kiro_headers
 from kiro_gateway.config import settings
+from kiro_gateway.metrics import metrics
 
 
 # 导入 debug_logger
@@ -355,7 +357,12 @@ class RequestHandler:
         Returns:
             StreamingResponse 或 JSONResponse
         """
-        auth_manager: KiroAuthManager = request.app.state.auth_manager
+        start_time = time.time()
+        api_type = "anthropic" if response_format == "anthropic" else "openai"
+
+        # Use auth_manager from request.state if available (multi-tenant mode)
+        # Otherwise fall back to global auth_manager
+        auth_manager: KiroAuthManager = getattr(request.state, 'auth_manager', None) or request.app.state.auth_manager
         model_cache: ModelInfoCache = request.app.state.model_cache
 
         # 准备日志
@@ -401,6 +408,15 @@ class RequestHandler:
             )
 
             if response.status_code != 200:
+                duration_ms = (time.time() - start_time) * 1000
+                metrics.record_request(
+                    endpoint=endpoint_name,
+                    status_code=response.status_code,
+                    duration_ms=duration_ms,
+                    model=request_data.model,
+                    is_stream=request_data.stream,
+                    api_type=api_type
+                )
                 return await RequestHandler.handle_api_error(
                     response,
                     http_client,
@@ -410,6 +426,17 @@ class RequestHandler:
 
             # 准备 token 计数数据
             messages_for_tokenizer, tools_for_tokenizer = RequestHandler.prepare_tokenizer_data(openai_request)
+
+            # 记录成功请求
+            duration_ms = (time.time() - start_time) * 1000
+            metrics.record_request(
+                endpoint=endpoint_name,
+                status_code=200,
+                duration_ms=duration_ms,
+                model=request_data.model,
+                is_stream=request_data.stream,
+                api_type=api_type
+            )
 
             # 根据请求类型和响应格式处理
             if request_data.stream:
@@ -466,12 +493,30 @@ class RequestHandler:
 
         except HTTPException as e:
             await http_client.close()
+            duration_ms = (time.time() - start_time) * 1000
+            metrics.record_request(
+                endpoint=endpoint_name,
+                status_code=e.status_code,
+                duration_ms=duration_ms,
+                model=request_data.model,
+                is_stream=request_data.stream,
+                api_type=api_type
+            )
             RequestHandler.log_error(endpoint_name, e.detail, e.status_code)
             if debug_logger:
                 debug_logger.flush_on_error(e.status_code, str(e.detail))
             raise
         except Exception as e:
             await http_client.close()
+            duration_ms = (time.time() - start_time) * 1000
+            metrics.record_request(
+                endpoint=endpoint_name,
+                status_code=500,
+                duration_ms=duration_ms,
+                model=request_data.model,
+                is_stream=request_data.stream,
+                api_type=api_type
+            )
             error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
             logger.error(f"Internal error: {error_msg}", exc_info=True)
             RequestHandler.log_error(endpoint_name, error_msg, 500)

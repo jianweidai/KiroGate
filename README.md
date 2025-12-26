@@ -71,12 +71,19 @@ cp .env.example .env
 # 编辑 .env 填写你的凭证
 docker-compose up -d
 
-# 方式二: 直接运行
+# 方式二: 直接运行（简单模式）
 docker build -t kirogate .
 docker run -d -p 8000:8000 \
   -e PROXY_API_KEY="your-password" \
   -e REFRESH_TOKEN="your-kiro-refresh-token" \
   --name kirogate kirogate
+
+# 方式三: 组合模式（推荐 - 无需配置 REFRESH_TOKEN）
+docker build -t kirogate .
+docker run -d -p 8000:8000 \
+  -e PROXY_API_KEY="your-password" \
+  --name kirogate kirogate
+# 用户在请求中传递 PROXY_API_KEY:REFRESH_TOKEN
 
 # 查看日志
 docker logs -f kirogate
@@ -88,10 +95,14 @@ docker logs -f kirogate
 
 ### 方式一: JSON 凭证文件（推荐）
 
-在 `.env` 中指定凭证文件路径:
+在 `.env` 中指定凭证文件路径或远程 URL:
 
 ```env
+# 本地文件
 KIRO_CREDS_FILE="~/.aws/sso/cache/kiro-auth-token.json"
+
+# 或远程 URL
+KIRO_CREDS_FILE="https://example.com/kiro-credentials.json"
 
 # 用于保护你的代理服务器的密码（自己设置一个安全的字符串）
 # 连接网关时需要使用这个密码作为 api_key
@@ -118,18 +129,29 @@ PROXY_API_KEY="my-super-secret-password-123"
 在项目根目录创建 `.env` 文件:
 
 ```env
-# 必填
-REFRESH_TOKEN="你的kiro_refresh_token"
-
-# 代理服务器密码
+# 必填：代理服务器密码（用于验证客户端请求）
 PROXY_API_KEY="my-super-secret-password-123"
 
-# 可选
+# 可选：全局 REFRESH_TOKEN（仅简单模式需要）
+# 如果使用组合模式（PROXY_API_KEY:REFRESH_TOKEN），可以不配置此项
+REFRESH_TOKEN="你的kiro_refresh_token"
+
+# 可选：其他配置
 PROFILE_ARN="arn:aws:codewhisperer:us-east-1:..."
 KIRO_REGION="us-east-1"
 ```
 
+**配置说明：**
+- **简单模式**：必须配置 `REFRESH_TOKEN` 环境变量
+- **组合模式**：无需配置 `REFRESH_TOKEN`，用户在请求中直接传递
+
 ### 获取 Refresh Token
+
+#### 推荐方式：使用 Kiro Account Manager ✨
+
+使用 [Kiro Account Manager](https://github.com/chaogei/Kiro-account-manager) 可以轻松管理和获取 Refresh Token，无需手动抓包。
+
+#### 手动方式：抓包获取
 
 可以通过拦截 Kiro IDE 流量获取 refresh token。查找发往以下地址的请求:
 - `prod.us-east-1.auth.desktop.kiro.dev/refreshToken`
@@ -150,12 +172,31 @@ KIRO_REGION="us-east-1"
 
 ### 认证方式
 
-两个端点都支持两种认证方式:
+支持两种认证模式，每种模式都兼容 OpenAI 和 Anthropic 格式：
 
-| 方式 | 请求头 | 格式 |
-|------|--------|------|
-| OpenAI 风格 | `Authorization` | `Bearer {PROXY_API_KEY}` |
-| Anthropic 风格 | `x-api-key` | `{PROXY_API_KEY}` |
+#### 模式 1: 简单模式（使用服务器配置的 REFRESH_TOKEN）
+
+| API 格式 | 请求头 | 格式 |
+|---------|--------|------|
+| OpenAI | `Authorization` | `Bearer {PROXY_API_KEY}` |
+| Anthropic | `x-api-key` | `{PROXY_API_KEY}` |
+
+#### 模式 2: 组合模式（用户自带 REFRESH_TOKEN）✨ 推荐
+
+| API 格式 | 请求头 | 格式 |
+|---------|--------|------|
+| OpenAI | `Authorization` | `Bearer {PROXY_API_KEY}:{REFRESH_TOKEN}` |
+| Anthropic | `x-api-key` | `{PROXY_API_KEY}:{REFRESH_TOKEN}` |
+
+**核心优势：**
+- 🚀 **无需配置环境变量**：REFRESH_TOKEN 直接在请求中传递，服务器无需配置 `REFRESH_TOKEN` 环境变量
+- 👥 **多租户支持**：每个用户使用自己的 REFRESH_TOKEN，多用户共享同一网关实例
+- 🔒 **安全隔离**：每个用户的认证信息独立管理，互不影响
+- ⚡ **缓存优化**：认证信息自动缓存（Python/Deno: 最多100个用户），提升性能
+
+**优先级说明：**
+- ✅ **优先使用组合模式**：如果 API Key 包含冒号 `:`，自动识别为 `PROXY_API_KEY:REFRESH_TOKEN` 格式
+- ✅ **回退到简单模式**：如果不包含冒号，使用服务器配置的全局 REFRESH_TOKEN
 
 ### 可用模型
 
@@ -177,7 +218,7 @@ KIRO_REGION="us-east-1"
 ### OpenAI API 格式
 
 <details>
-<summary>🔹 cURL 请求</summary>
+<summary>🔹 cURL 请求（简单模式）</summary>
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -193,7 +234,23 @@ curl http://localhost:8000/v1/chat/completions \
 </details>
 
 <details>
-<summary>🐍 Python OpenAI SDK</summary>
+<summary>🔹 cURL 请求（组合模式 - 推荐）</summary>
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer my-proxy-key:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "messages": [{"role": "user", "content": "你好！"}],
+    "stream": true
+  }'
+```
+
+</details>
+
+<details>
+<summary>🐍 Python OpenAI SDK（简单模式）</summary>
 
 ```python
 from openai import OpenAI
@@ -201,6 +258,34 @@ from openai import OpenAI
 client = OpenAI(
     base_url="http://localhost:8000/v1",
     api_key="my-super-secret-password-123"  # 你的 PROXY_API_KEY
+)
+
+response = client.chat.completions.create(
+    model="claude-sonnet-4-5",
+    messages=[
+        {"role": "system", "content": "你是一个有帮助的助手。"},
+        {"role": "user", "content": "你好！"}
+    ],
+    stream=True
+)
+
+for chunk in response:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")
+```
+
+</details>
+
+<details>
+<summary>🐍 Python OpenAI SDK（组合模式 - 推荐）</summary>
+
+```python
+from openai import OpenAI
+
+# 组合模式：PROXY_API_KEY:REFRESH_TOKEN
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="my-proxy-key:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 )
 
 response = client.chat.completions.create(
@@ -240,7 +325,7 @@ print(response.content)
 ### Anthropic API 格式
 
 <details>
-<summary>🤖 Claude Code CLI</summary>
+<summary>🤖 Claude Code CLI（简单模式）</summary>
 
 配置 Claude Code CLI 使用你的网关:
 
@@ -256,7 +341,29 @@ claude config set --global apiBaseUrl "http://localhost:8000"
 </details>
 
 <details>
-<summary>🐍 Anthropic Python SDK</summary>
+<summary>🤖 Claude Code CLI（组合模式 - 推荐）</summary>
+
+配置 Claude Code CLI 使用你的网关（多租户模式）:
+
+```bash
+# 设置环境变量（组合格式）
+export ANTHROPIC_BASE_URL="http://localhost:8000"
+export ANTHROPIC_API_KEY="my-proxy-key:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+
+# 或者在 Claude Code 设置中配置
+claude config set --global apiBaseUrl "http://localhost:8000"
+claude config set --global apiKey "my-proxy-key:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+```
+
+**优势：**
+- ✅ 无需在服务器配置 REFRESH_TOKEN
+- ✅ 每个用户使用自己的 REFRESH_TOKEN
+- ✅ 支持多用户共享同一个网关实例
+
+</details>
+
+<details>
+<summary>🐍 Anthropic Python SDK（简单模式）</summary>
 
 ```python
 from anthropic import Anthropic
@@ -289,11 +396,62 @@ with client.messages.stream(
 </details>
 
 <details>
-<summary>🔹 Anthropic cURL 请求</summary>
+<summary>🐍 Anthropic Python SDK（组合模式 - 推荐）</summary>
+
+```python
+from anthropic import Anthropic
+
+# 组合模式：PROXY_API_KEY:REFRESH_TOKEN
+client = Anthropic(
+    base_url="http://localhost:8000",
+    api_key="my-proxy-key:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+)
+
+# 非流式
+message = client.messages.create(
+    model="claude-sonnet-4-5",
+    max_tokens=1024,
+    messages=[
+        {"role": "user", "content": "你好，Claude！"}
+    ]
+)
+print(message.content[0].text)
+
+# 流式
+with client.messages.stream(
+    model="claude-sonnet-4-5",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "你好！"}]
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+</details>
+
+<details>
+<summary>🔹 Anthropic cURL 请求（简单模式）</summary>
 
 ```bash
 curl http://localhost:8000/v1/messages \
   -H "x-api-key: my-super-secret-password-123" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "你好！"}]
+  }'
+```
+
+</details>
+
+<details>
+<summary>🔹 Anthropic cURL 请求（组合模式 - 推荐）</summary>
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "x-api-key: my-proxy-key:eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
   -d '{

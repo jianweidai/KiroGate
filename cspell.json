@@ -1,0 +1,25 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "kiro",
+    "kirogate",
+    "creds",
+    "dext",
+    "denoland",
+    "deployctl",
+    "chatcmpl",
+    "tiktoken",
+    "toolu",
+    "retryable",
+    "codewhisperer",
+    "optout",
+    "changeme"
+  ],
+  "ignorePaths": [
+    "node_modules",
+    "*.lock",
+    "dist",
+    ".git"
+  ]
+}

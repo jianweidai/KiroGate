@@ -120,64 +120,36 @@ def validate_configuration() -> None:
     """
     验证所需配置是否存在。
 
-    检查：
-    - .env 文件是否存在
-    - 是否配置了 REFRESH_TOKEN 或 KIRO_CREDS_FILE
+    支持两种认证模式：
+    1. 简单模式：需要配置 REFRESH_TOKEN 或 KIRO_CREDS_FILE
+    2. 组合模式：只需配置 PROXY_API_KEY，REFRESH_TOKEN 由用户在请求中传递
 
     Raises:
-        SystemExit: 如果缺少关键配置
+        SystemExit: 如果缺少关键配置（PROXY_API_KEY）
     """
     errors = []
 
-    # 检查 .env 文件是否存在
-    env_file = Path(".env")
-    env_example = Path(".env.example")
-
-    if not env_file.exists():
+    # PROXY_API_KEY 是必须的
+    if not settings.proxy_api_key:
         errors.append(
-            ".env file not found!\n"
+            "PROXY_API_KEY is required!\n"
             "\n"
-            "To get started:\n"
-            "1. Create .env or rename from .env.example:\n"
-            "   cp .env.example .env\n"
-            "\n"
-            "2. Edit .env and configure your credentials:\n"
-            "   2.1. Set you super-secret password as PROXY_API_KEY\n"
-            "   2.2. Set your Kiro credentials:\n"
-            "      - 1 way: KIRO_CREDS_FILE to your Kiro credentials JSON file\n"
-            "      - 2 way: REFRESH_TOKEN from Kiro IDE traffic\n"
-            "\n"
-            "See README.md for detailed instructions."
+            "Set PROXY_API_KEY in environment variable or .env file.\n"
+            "This is the password used to authenticate API requests."
         )
-    else:
-        # .env 存在，检查凭证
-        has_refresh_token = bool(settings.refresh_token)
-        has_creds_file = bool(settings.kiro_creds_file)
 
-        # 检查凭证文件是否实际存在
-        if settings.kiro_creds_file:
+    # 检查凭证配置
+    has_refresh_token = bool(settings.refresh_token)
+    has_creds_file = bool(settings.kiro_creds_file)
+
+    # 检查凭证文件是否实际存在（URL 跳过本地路径检查）
+    if settings.kiro_creds_file:
+        is_url = settings.kiro_creds_file.startswith(('http://', 'https://'))
+        if not is_url:
             creds_path = Path(settings.kiro_creds_file).expanduser()
             if not creds_path.exists():
                 has_creds_file = False
                 logger.warning(f"KIRO_CREDS_FILE not found: {settings.kiro_creds_file}")
-
-        if not has_refresh_token and not has_creds_file:
-            errors.append(
-                "No Kiro credentials configured!\n"
-                "\n"
-                "   Configure one of the following in your .env file:\n"
-                "\n"
-                "Set you super-secret password as PROXY_API_KEY\n"
-                "   PROXY_API_KEY=\"my-super-secret-password-123\"\n"
-                "\n"
-                "   Option 1 (Recommended): JSON credentials file\n"
-                "      KIRO_CREDS_FILE=\"path/to/your/kiro-credentials.json\"\n"
-                "\n"
-                "   Option 2: Refresh token\n"
-                "      REFRESH_TOKEN=\"your_refresh_token_here\"\n"
-                "\n"
-                "   See README.md for how to obtain credentials."
-            )
 
     # 打印错误并退出（如果有）
     if errors:
@@ -192,11 +164,24 @@ def validate_configuration() -> None:
         logger.error("")
         sys.exit(1)
 
-    # 记录成功的配置
-    if settings.kiro_creds_file:
-        logger.info(f"Using credentials file: {settings.kiro_creds_file}")
-    elif settings.refresh_token:
-        logger.info("Using refresh token from environment")
+    # 记录配置模式
+    config_source = "environment variables" if not Path(".env").exists() else ".env file"
+
+    if has_refresh_token or has_creds_file:
+        # 简单模式：服务器配置了 REFRESH_TOKEN
+        if settings.kiro_creds_file:
+            if settings.kiro_creds_file.startswith(('http://', 'https://')):
+                logger.info(f"Using credentials from URL: {settings.kiro_creds_file} (via {config_source})")
+            else:
+                logger.info(f"Using credentials file: {settings.kiro_creds_file} (via {config_source})")
+        elif settings.refresh_token:
+            logger.info(f"Using refresh token (via {config_source})")
+        logger.info("Auth mode: Simple mode (server-configured REFRESH_TOKEN) + Multi-tenant mode supported")
+    else:
+        # 仅组合模式：用户在请求中传递 REFRESH_TOKEN
+        logger.info("No REFRESH_TOKEN configured - running in multi-tenant only mode")
+        logger.info("Auth mode: Multi-tenant only (users must provide PROXY_API_KEY:REFRESH_TOKEN)")
+        logger.info("Tip: Configure REFRESH_TOKEN to enable simple mode authentication")
 
 
 # 运行配置验证
@@ -210,13 +195,16 @@ async def lifespan(app: FastAPI):
     管理应用程序生命周期。
 
     创建并初始化：
-    - KiroAuthManager 用于 token 管理
+    - KiroAuthManager 用于 token 管理（简单模式）
     - ModelInfoCache 用于模型缓存
     - 启动后台任务
     """
     logger.info("Starting application... Creating state managers.")
 
-    # 创建 AuthManager
+    # 检查是否配置了全局凭证
+    has_global_credentials = bool(settings.refresh_token) or bool(settings.kiro_creds_file)
+
+    # 创建全局 AuthManager（简单模式使用）
     auth_manager = KiroAuthManager(
         refresh_token=settings.refresh_token,
         profile_arn=settings.profile_arn,
@@ -230,13 +218,18 @@ async def lifespan(app: FastAPI):
     model_cache.set_auth_manager(auth_manager)
     app.state.model_cache = model_cache
 
-    # 启动后台刷新任务
-    await model_cache.start_background_refresh()
+    # 仅在有全局凭证时启动后台刷新和初始填充
+    if has_global_credentials:
+        # 启动后台刷新任务
+        await model_cache.start_background_refresh()
 
-    # 初始填充缓存
-    if model_cache.is_empty():
-        logger.info("Performing initial model cache population...")
-        await model_cache.refresh()
+        # 初始填充缓存
+        if model_cache.is_empty():
+            logger.info("Performing initial model cache population...")
+            await model_cache.refresh()
+    else:
+        logger.warning("No global credentials configured - model cache refresh disabled")
+        logger.warning("Simple mode authentication will not work, only multi-tenant mode available")
 
     logger.info("Application startup complete.")
 
@@ -245,7 +238,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down application...")
 
     # 停止后台任务
-    await model_cache.stop_background_refresh()
+    if has_global_credentials:
+        await model_cache.stop_background_refresh()
 
     # 关闭全局 HTTP 客户端
     await close_global_http_client()
@@ -258,7 +252,9 @@ app = FastAPI(
     title=APP_TITLE,
     description=APP_DESCRIPTION,
     version=APP_VERSION,
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None,  # 禁用默认的 /docs，使用自定义页面
+    redoc_url=None  # 禁用默认的 /redoc
 )
 
 # 添加中间件（顺序很重要）

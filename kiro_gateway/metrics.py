@@ -56,6 +56,8 @@ class PrometheusMetrics:
 
     # Latency histogram bucket boundaries (seconds)
     LATENCY_BUCKETS = [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, float('inf')]
+    MAX_RECENT_REQUESTS = 50
+    MAX_RESPONSE_TIMES = 100
 
     def __init__(self):
         """Initialize metrics collector."""
@@ -84,6 +86,13 @@ class PrometheusMetrics:
 
         # Start time
         self._start_time = time.time()
+
+        # Deno-compatible fields
+        self._stream_requests = 0
+        self._non_stream_requests = 0
+        self._response_times: List[float] = []
+        self._recent_requests: List[Dict] = []
+        self._api_type_usage: Dict[str, int] = defaultdict(int)  # {openai/anthropic: count}
 
     def inc_request(self, endpoint: str, status_code: int, model: str = "unknown") -> None:
         """
@@ -173,6 +182,102 @@ class PrometheusMetrics:
         """Set token validity status."""
         with self._lock:
             self._token_valid = valid
+
+    def record_request(
+        self,
+        endpoint: str,
+        status_code: int,
+        duration_ms: float,
+        model: str = "unknown",
+        is_stream: bool = False,
+        api_type: str = "openai"
+    ) -> None:
+        """
+        Record a complete request with all Deno-compatible fields.
+
+        Args:
+            endpoint: API endpoint
+            status_code: HTTP status code
+            duration_ms: Duration in milliseconds
+            model: Model name
+            is_stream: Whether streaming request
+            api_type: API type (openai/anthropic)
+        """
+        with self._lock:
+            # Increment stream/non-stream counters
+            if is_stream:
+                self._stream_requests += 1
+            else:
+                self._non_stream_requests += 1
+
+            # Track API type usage
+            self._api_type_usage[api_type] += 1
+
+            # Add to response times (keep last N)
+            self._response_times.append(duration_ms)
+            if len(self._response_times) > self.MAX_RESPONSE_TIMES:
+                self._response_times.pop(0)
+
+            # Add to recent requests (keep last N)
+            self._recent_requests.append({
+                "timestamp": int(time.time() * 1000),
+                "apiType": api_type,
+                "path": endpoint,
+                "status": status_code,
+                "duration": duration_ms,
+                "model": model
+            })
+            if len(self._recent_requests) > self.MAX_RECENT_REQUESTS:
+                self._recent_requests.pop(0)
+
+    def get_deno_compatible_metrics(self) -> Dict:
+        """
+        Get metrics in Deno-compatible format for dashboard.
+
+        Returns:
+            Deno-compatible metrics dictionary
+        """
+        with self._lock:
+            # Calculate totals from request_total
+            total_requests = sum(self._request_total.values())
+            success_requests = 0
+            failed_requests = 0
+
+            for key, count in self._request_total.items():
+                parts = key.split(":")
+                if len(parts) >= 2:
+                    status = int(parts[1])
+                    if 200 <= status < 400:
+                        success_requests += count
+                    else:
+                        failed_requests += count
+
+            # Calculate average response time
+            avg_response_time = 0.0
+            if self._response_times:
+                avg_response_time = sum(self._response_times) / len(self._response_times)
+
+            # Aggregate model usage
+            model_usage = {}
+            for key, count in self._request_total.items():
+                parts = key.split(":")
+                if len(parts) >= 3:
+                    model = parts[2]
+                    model_usage[model] = model_usage.get(model, 0) + count
+
+            return {
+                "totalRequests": total_requests,
+                "successRequests": success_requests,
+                "failedRequests": failed_requests,
+                "avgResponseTime": avg_response_time,
+                "responseTimes": list(self._response_times),
+                "streamRequests": self._stream_requests,
+                "nonStreamRequests": self._non_stream_requests,
+                "modelUsage": model_usage,
+                "apiTypeUsage": dict(self._api_type_usage),
+                "recentRequests": list(self._recent_requests),
+                "startTime": int(self._start_time * 1000)
+            }
 
     def get_metrics(self) -> Dict:
         """

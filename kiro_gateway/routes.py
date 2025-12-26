@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security, Header
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from fastapi.security import APIKeyHeader
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -53,9 +53,20 @@ from kiro_gateway.models import (
     AnthropicMessagesRequest,
 )
 from kiro_gateway.auth import KiroAuthManager
+from kiro_gateway.auth_cache import auth_cache
 from kiro_gateway.cache import ModelInfoCache
 from kiro_gateway.request_handler import RequestHandler
 from kiro_gateway.utils import get_kiro_headers
+from kiro_gateway.config import settings
+from kiro_gateway.pages import (
+    render_home_page,
+    render_docs_page,
+    render_playground_page,
+    render_deploy_page,
+    render_status_page,
+    render_dashboard_page,
+    render_swagger_page,
+)
 
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -90,54 +101,160 @@ except ImportError:
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 
-async def verify_api_key(auth_header: str = Security(api_key_header)) -> bool:
+def _mask_token(token: str) -> str:
     """
-    Verify API key in Authorization header.
+    Mask token for logging (show only first and last 4 chars).
 
-    Expected format: "Bearer {PROXY_API_KEY}"
+    Args:
+        token: Token to mask
+
+    Returns:
+        Masked token string
+    """
+    if len(token) <= 8:
+        return "***"
+    return f"{token[:4]}...{token[-4:]}"
+
+
+async def _parse_auth_header(auth_header: str) -> tuple[str, KiroAuthManager]:
+    """
+    Parse Authorization header and return proxy key and AuthManager.
+
+    Supports two formats:
+    1. Traditional: "Bearer {PROXY_API_KEY}" - uses global AuthManager
+    2. Multi-tenant: "Bearer {PROXY_API_KEY}:{REFRESH_TOKEN}" - creates per-user AuthManager
 
     Args:
         auth_header: Authorization header value
 
     Returns:
-        True if key is valid
+        Tuple of (proxy_key, auth_manager)
 
     Raises:
         HTTPException: 401 if key is invalid or missing
     """
-    if not auth_header or not secrets.compare_digest(auth_header, f"Bearer {PROXY_API_KEY}"):
-        logger.warning("Access attempt with invalid API key.")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        logger.warning("Missing or invalid Authorization header format")
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")
-    return True
+
+    token = auth_header[7:]  # Remove "Bearer "
+
+    # Check if token contains ':' (multi-tenant format)
+    if ':' in token:
+        parts = token.split(':', 1)  # Split only once
+        proxy_key = parts[0]
+        refresh_token = parts[1]
+
+        # Verify proxy key
+        if not secrets.compare_digest(proxy_key, PROXY_API_KEY):
+            logger.warning(f"Invalid proxy key in multi-tenant format: {_mask_token(proxy_key)}")
+            raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+
+        # Get or create AuthManager for this refresh token
+        logger.debug(f"Multi-tenant mode: using custom refresh token {_mask_token(refresh_token)}")
+        auth_manager = await auth_cache.get_or_create(
+            refresh_token=refresh_token,
+            region=settings.region,
+            profile_arn=settings.profile_arn
+        )
+        return proxy_key, auth_manager
+    else:
+        # Traditional mode: verify entire token as PROXY_API_KEY
+        if not secrets.compare_digest(token, PROXY_API_KEY):
+            logger.warning("Invalid API key in traditional format")
+            raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+
+        # Return None to indicate using global AuthManager
+        logger.debug("Traditional mode: using global AuthManager")
+        return token, None
+
+
+async def verify_api_key(
+    request: Request,
+    auth_header: str = Security(api_key_header)
+) -> KiroAuthManager:
+    """
+    Verify API key in Authorization header and return appropriate AuthManager.
+
+    Supports two formats:
+    1. Traditional: "Bearer {PROXY_API_KEY}" - uses global AuthManager
+    2. Multi-tenant: "Bearer {PROXY_API_KEY}:{REFRESH_TOKEN}" - creates per-user AuthManager
+
+    Args:
+        request: FastAPI Request for accessing app.state
+        auth_header: Authorization header value
+
+    Returns:
+        KiroAuthManager instance (global or per-user)
+
+    Raises:
+        HTTPException: 401 if key is invalid or missing
+    """
+    proxy_key, auth_manager = await _parse_auth_header(auth_header)
+
+    # If auth_manager is None, use global AuthManager
+    if auth_manager is None:
+        auth_manager = request.app.state.auth_manager
+
+    return auth_manager
 
 
 async def verify_anthropic_api_key(
+    request: Request,
     x_api_key: str = Header(None, alias="x-api-key"),
     auth_header: str = Security(api_key_header)
-) -> bool:
+) -> KiroAuthManager:
     """
-    Verify Anthropic or OpenAI format API key.
+    Verify Anthropic or OpenAI format API key and return appropriate AuthManager.
 
     Anthropic uses x-api-key header, but we also support
     standard Authorization: Bearer format for compatibility.
 
+    Supports two formats:
+    1. Traditional: "{PROXY_API_KEY}" - uses global AuthManager
+    2. Multi-tenant: "{PROXY_API_KEY}:{REFRESH_TOKEN}" - creates per-user AuthManager
+
     Args:
+        request: FastAPI Request for accessing app.state
         x_api_key: x-api-key header value (Anthropic format)
         auth_header: Authorization header value (OpenAI format)
 
     Returns:
-        True if key is valid
+        KiroAuthManager instance (global or per-user)
 
     Raises:
         HTTPException: 401 if key is invalid or missing
     """
-    # Check x-api-key (Anthropic format)
-    if x_api_key and secrets.compare_digest(x_api_key, PROXY_API_KEY):
-        return True
+    # Try x-api-key first (Anthropic format)
+    if x_api_key:
+        # Check if x-api-key contains ':' (multi-tenant format)
+        if ':' in x_api_key:
+            parts = x_api_key.split(':', 1)
+            proxy_key = parts[0]
+            refresh_token = parts[1]
 
-    # Check Authorization: Bearer (OpenAI format)
-    if auth_header and secrets.compare_digest(auth_header, f"Bearer {PROXY_API_KEY}"):
-        return True
+            # Verify proxy key
+            if not secrets.compare_digest(proxy_key, PROXY_API_KEY):
+                logger.warning(f"Invalid proxy key in x-api-key: {_mask_token(proxy_key)}")
+                raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+
+            # Get or create AuthManager for this refresh token
+            logger.debug(f"Multi-tenant mode (x-api-key): using custom refresh token {_mask_token(refresh_token)}")
+            auth_manager = await auth_cache.get_or_create(
+                refresh_token=refresh_token,
+                region=settings.region,
+                profile_arn=settings.profile_arn
+            )
+            return auth_manager
+        else:
+            # Traditional mode: verify entire x-api-key as PROXY_API_KEY
+            if secrets.compare_digest(x_api_key, PROXY_API_KEY):
+                logger.debug("Traditional mode (x-api-key): using global AuthManager")
+                return request.app.state.auth_manager
+
+    # Try Authorization header (OpenAI format)
+    if auth_header:
+        return await verify_api_key(request, auth_header)
 
     logger.warning("Access attempt with invalid API key (Anthropic endpoint).")
     raise HTTPException(status_code=401, detail="Invalid or missing API Key")
@@ -147,10 +264,21 @@ async def verify_anthropic_api_key(
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("/", response_class=HTMLResponse)
 async def root():
     """
-    Health check endpoint.
+    Home page with dashboard.
+
+    Returns:
+        HTML home page
+    """
+    return HTMLResponse(content=render_home_page())
+
+
+@router.get("/api", response_class=JSONResponse)
+async def api_root():
+    """
+    API health check endpoint (JSON).
 
     Returns:
         Application status and version info
@@ -160,6 +288,94 @@ async def root():
         "message": "Kiro API Gateway is running",
         "version": APP_VERSION
     }
+
+
+@router.get("/docs", response_class=HTMLResponse)
+async def docs_page():
+    """
+    API documentation page.
+
+    Returns:
+        HTML documentation page
+    """
+    return HTMLResponse(content=render_docs_page())
+
+
+@router.get("/playground", response_class=HTMLResponse)
+async def playground_page():
+    """
+    API playground page.
+
+    Returns:
+        HTML playground page
+    """
+    return HTMLResponse(content=render_playground_page())
+
+
+@router.get("/deploy", response_class=HTMLResponse)
+async def deploy_page():
+    """
+    Deployment guide page.
+
+    Returns:
+        HTML deployment guide page
+    """
+    return HTMLResponse(content=render_deploy_page())
+
+
+@router.get("/status", response_class=HTMLResponse)
+async def status_page(request: Request):
+    """
+    Status page with system health info.
+
+    Returns:
+        HTML status page
+    """
+    from kiro_gateway.metrics import metrics
+
+    auth_manager: KiroAuthManager = request.app.state.auth_manager
+    model_cache: ModelInfoCache = request.app.state.model_cache
+
+    # Check if token is valid
+    token_valid = False
+    try:
+        if auth_manager._access_token and not auth_manager.is_token_expiring_soon():
+            token_valid = True
+    except Exception:
+        token_valid = False
+
+    status_data = {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": APP_VERSION,
+        "token_valid": token_valid,
+        "cache_size": model_cache.size,
+        "cache_last_update": model_cache.last_update_time
+    }
+
+    return HTMLResponse(content=render_status_page(status_data))
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_page():
+    """
+    Dashboard page with metrics and charts.
+
+    Returns:
+        HTML dashboard page
+    """
+    return HTMLResponse(content=render_dashboard_page())
+
+
+@router.get("/swagger", response_class=HTMLResponse)
+async def swagger_page():
+    """
+    Swagger UI page for API documentation.
+
+    Returns:
+        HTML Swagger UI page
+    """
+    return HTMLResponse(content=render_swagger_page())
 
 
 @router.get("/health")
@@ -209,6 +425,18 @@ async def get_metrics():
     return metrics.get_metrics()
 
 
+@router.get("/api/metrics")
+async def get_api_metrics():
+    """
+    Get application metrics in Deno-compatible format for dashboard.
+
+    Returns:
+        Deno-compatible metrics data dictionary
+    """
+    from kiro_gateway.metrics import metrics
+    return metrics.get_deno_compatible_metrics()
+
+
 @router.get("/metrics/prometheus")
 async def get_prometheus_metrics():
     """
@@ -224,9 +452,12 @@ async def get_prometheus_metrics():
     )
 
 
-@router.get("/v1/models", response_model=ModelList, dependencies=[Depends(verify_api_key)])
+@router.get("/v1/models", response_model=ModelList)
 @rate_limit_decorator()
-async def get_models(request: Request):
+async def get_models(
+    request: Request,
+    auth_manager: KiroAuthManager = Depends(verify_api_key)
+):
     """
     Return available models list.
 
@@ -235,6 +466,7 @@ async def get_models(request: Request):
 
     Args:
         request: FastAPI Request for accessing app.state
+        auth_manager: KiroAuthManager instance (from verify_api_key)
 
     Returns:
         ModelList containing available models
@@ -265,9 +497,13 @@ async def get_models(request: Request):
     return ModelList(data=openai_models)
 
 
-@router.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)])
+@router.post("/v1/chat/completions")
 @rate_limit_decorator()
-async def chat_completions(request: Request, request_data: ChatCompletionRequest):
+async def chat_completions(
+    request: Request,
+    request_data: ChatCompletionRequest,
+    auth_manager: KiroAuthManager = Depends(verify_api_key)
+):
     """
     Chat completions endpoint - OpenAI API compatible.
 
@@ -277,6 +513,7 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
     Args:
         request: FastAPI Request for accessing app.state
         request_data: OpenAI ChatCompletionRequest format
+        auth_manager: KiroAuthManager instance (from verify_api_key)
 
     Returns:
         StreamingResponse for streaming mode
@@ -286,6 +523,10 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/chat/completions (model={request_data.model}, stream={request_data.stream})")
+
+    # Store auth_manager and model in request state for RequestHandler and metrics
+    request.state.auth_manager = auth_manager
+    request.state.model = request_data.model
 
     return await RequestHandler.process_request(
         request,
@@ -300,9 +541,13 @@ async def chat_completions(request: Request, request_data: ChatCompletionRequest
 # Anthropic Messages API Endpoint (/v1/messages)
 # ==================================================================================================
 
-@router.post("/v1/messages", dependencies=[Depends(verify_anthropic_api_key)])
+@router.post("/v1/messages")
 @rate_limit_decorator()
-async def anthropic_messages(request: Request, request_data: AnthropicMessagesRequest):
+async def anthropic_messages(
+    request: Request,
+    request_data: AnthropicMessagesRequest,
+    auth_manager: KiroAuthManager = Depends(verify_anthropic_api_key)
+):
     """
     Anthropic Messages API endpoint - Anthropic SDK compatible.
 
@@ -312,6 +557,7 @@ async def anthropic_messages(request: Request, request_data: AnthropicMessagesRe
     Args:
         request: FastAPI Request for accessing app.state
         request_data: Anthropic MessagesRequest format
+        auth_manager: KiroAuthManager instance (from verify_anthropic_api_key)
 
     Returns:
         StreamingResponse for streaming mode
@@ -321,6 +567,10 @@ async def anthropic_messages(request: Request, request_data: AnthropicMessagesRe
         HTTPException: On validation or API errors
     """
     logger.info(f"Request to /v1/messages (model={request_data.model}, stream={request_data.stream})")
+
+    # Store auth_manager and model in request state for RequestHandler and metrics
+    request.state.auth_manager = auth_manager
+    request.state.model = request_data.model
 
     return await RequestHandler.process_request(
         request,
