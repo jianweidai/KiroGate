@@ -32,8 +32,8 @@ import secrets
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security, Header
-from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security, Header, Form
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, RedirectResponse
 from fastapi.security import APIKeyHeader
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -116,19 +116,22 @@ def _mask_token(token: str) -> str:
     return f"{token[:4]}...{token[-4:]}"
 
 
-async def _parse_auth_header(auth_header: str) -> tuple[str, KiroAuthManager]:
+async def _parse_auth_header(auth_header: str, request: Request = None) -> tuple[str, KiroAuthManager, int | None, int | None]:
     """
-    Parse Authorization header and return proxy key and AuthManager.
+    Parse Authorization header and return proxy key, AuthManager, and optional user/key IDs.
 
-    Supports two formats:
+    Supports three formats:
     1. Traditional: "Bearer {PROXY_API_KEY}" - uses global AuthManager
     2. Multi-tenant: "Bearer {PROXY_API_KEY}:{REFRESH_TOKEN}" - creates per-user AuthManager
+    3. User API Key: "Bearer sk-xxx" - uses user's donated tokens
 
     Args:
         auth_header: Authorization header value
+        request: Optional FastAPI Request for accessing app.state
 
     Returns:
-        Tuple of (proxy_key, auth_manager)
+        Tuple of (proxy_key, auth_manager, user_id, api_key_id)
+        user_id and api_key_id are set when using sk-xxx format
 
     Raises:
         HTTPException: 401 if key is invalid or missing
@@ -138,6 +141,40 @@ async def _parse_auth_header(auth_header: str) -> tuple[str, KiroAuthManager]:
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")
 
     token = auth_header[7:]  # Remove "Bearer "
+
+    # Check if it's a user API key (sk-xxx format)
+    if token.startswith("sk-"):
+        from kiro_gateway.database import user_db
+        from kiro_gateway.token_allocator import token_allocator, NoTokenAvailable
+
+        result = user_db.verify_api_key(token)
+        if not result:
+            logger.warning(f"Invalid user API key: {_mask_token(token)}")
+            raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+
+        user_id, api_key = result
+
+        # Check if user is banned
+        user = user_db.get_user(user_id)
+        if not user or user.is_banned:
+            logger.warning(f"Banned user attempted to use API key: user_id={user_id}")
+            raise HTTPException(status_code=403, detail="User is banned")
+
+        # Get best token for this user
+        try:
+            donated_token, auth_manager = await token_allocator.get_best_token(user_id)
+            logger.debug(f"User API key mode: user_id={user_id}, using token_id={donated_token.id}")
+
+            # Store token_id in request state for usage tracking
+            if request:
+                request.state.donated_token_id = donated_token.id
+                request.state.api_key_id = api_key.id
+                request.state.user_id = user_id
+
+            return token, auth_manager, user_id, api_key.id
+        except NoTokenAvailable as e:
+            logger.warning(f"No token available for user {user_id}: {e}")
+            raise HTTPException(status_code=503, detail="No tokens available for this user")
 
     # Check if token contains ':' (multi-tenant format)
     if ':' in token:
@@ -157,7 +194,7 @@ async def _parse_auth_header(auth_header: str) -> tuple[str, KiroAuthManager]:
             region=settings.region,
             profile_arn=settings.profile_arn
         )
-        return proxy_key, auth_manager
+        return proxy_key, auth_manager, None, None
     else:
         # Traditional mode: verify entire token as PROXY_API_KEY
         if not secrets.compare_digest(token, PROXY_API_KEY):
@@ -166,7 +203,7 @@ async def _parse_auth_header(auth_header: str) -> tuple[str, KiroAuthManager]:
 
         # Return None to indicate using global AuthManager
         logger.debug("Traditional mode: using global AuthManager")
-        return token, None
+        return token, None, None, None
 
 
 async def verify_api_key(
@@ -176,9 +213,10 @@ async def verify_api_key(
     """
     Verify API key in Authorization header and return appropriate AuthManager.
 
-    Supports two formats:
+    Supports three formats:
     1. Traditional: "Bearer {PROXY_API_KEY}" - uses global AuthManager
     2. Multi-tenant: "Bearer {PROXY_API_KEY}:{REFRESH_TOKEN}" - creates per-user AuthManager
+    3. User API Key: "Bearer sk-xxx" - uses user's donated tokens
 
     Args:
         request: FastAPI Request for accessing app.state
@@ -190,7 +228,7 @@ async def verify_api_key(
     Raises:
         HTTPException: 401 if key is invalid or missing
     """
-    proxy_key, auth_manager = await _parse_auth_header(auth_header)
+    proxy_key, auth_manager, user_id, api_key_id = await _parse_auth_header(auth_header, request)
 
     # If auth_manager is None, use global AuthManager
     if auth_manager is None:
@@ -210,9 +248,10 @@ async def verify_anthropic_api_key(
     Anthropic uses x-api-key header, but we also support
     standard Authorization: Bearer format for compatibility.
 
-    Supports two formats:
+    Supports three formats:
     1. Traditional: "{PROXY_API_KEY}" - uses global AuthManager
     2. Multi-tenant: "{PROXY_API_KEY}:{REFRESH_TOKEN}" - creates per-user AuthManager
+    3. User API Key: "sk-xxx" - uses user's donated tokens
 
     Args:
         request: FastAPI Request for accessing app.state
@@ -227,6 +266,37 @@ async def verify_anthropic_api_key(
     """
     # Try x-api-key first (Anthropic format)
     if x_api_key:
+        # Check if it's a user API key (sk-xxx format)
+        if x_api_key.startswith("sk-"):
+            from kiro_gateway.database import user_db
+            from kiro_gateway.token_allocator import token_allocator, NoTokenAvailable
+
+            result = user_db.verify_api_key(x_api_key)
+            if not result:
+                logger.warning(f"Invalid user API key in x-api-key: {_mask_token(x_api_key)}")
+                raise HTTPException(status_code=401, detail="Invalid or missing API Key")
+
+            user_id, api_key = result
+
+            # Check if user is banned
+            user = user_db.get_user(user_id)
+            if not user or user.is_banned:
+                logger.warning(f"Banned user attempted to use API key: user_id={user_id}")
+                raise HTTPException(status_code=403, detail="User is banned")
+
+            try:
+                donated_token, auth_manager = await token_allocator.get_best_token(user_id)
+                logger.debug(f"User API key mode (x-api-key): user_id={user_id}, using token_id={donated_token.id}")
+
+                request.state.donated_token_id = donated_token.id
+                request.state.api_key_id = api_key.id
+                request.state.user_id = user_id
+
+                return auth_manager
+            except NoTokenAvailable as e:
+                logger.warning(f"No token available for user {user_id}: {e}")
+                raise HTTPException(status_code=503, detail="No tokens available for this user")
+
         # Check if x-api-key contains ':' (multi-tenant format)
         if ':' in x_api_key:
             parts = x_api_key.split(':', 1)
@@ -594,3 +664,686 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
             }
         }
     )
+
+
+# ==================== Admin Routes (Hidden from Swagger) ====================
+
+def create_admin_session() -> str:
+    """Create signed admin session token."""
+    from itsdangerous import URLSafeTimedSerializer
+    from kiro_gateway.config import ADMIN_SECRET_KEY
+    serializer = URLSafeTimedSerializer(ADMIN_SECRET_KEY)
+    return serializer.dumps({"admin": True})
+
+
+def verify_admin_session(token: str) -> bool:
+    """Verify admin session token."""
+    if not token:
+        return False
+    try:
+        from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+        from kiro_gateway.config import ADMIN_SECRET_KEY, ADMIN_SESSION_MAX_AGE
+        serializer = URLSafeTimedSerializer(ADMIN_SECRET_KEY)
+        serializer.loads(token, max_age=ADMIN_SESSION_MAX_AGE)
+        return True
+    except Exception:
+        return False
+
+
+@router.get("/admin/login", response_class=HTMLResponse, include_in_schema=False)
+async def admin_login_page():
+    """Admin login page."""
+    from kiro_gateway.pages import render_admin_login_page
+    return HTMLResponse(content=render_admin_login_page())
+
+
+@router.post("/admin/login", include_in_schema=False)
+async def admin_login(request: Request, password: str = Form(...)):
+    """Handle admin login."""
+    from kiro_gateway.config import ADMIN_PASSWORD
+    if password == ADMIN_PASSWORD:
+        response = RedirectResponse(url="/admin", status_code=303)
+        response.set_cookie(
+            key="admin_session",
+            value=create_admin_session(),
+            httponly=True,
+            max_age=86400,
+            samesite="lax"
+        )
+        return response
+    from kiro_gateway.pages import render_admin_login_page
+    return HTMLResponse(content=render_admin_login_page(error="密码错误"))
+
+
+@router.get("/admin/logout", include_in_schema=False)
+async def admin_logout():
+    """Admin logout."""
+    response = RedirectResponse(url="/admin/login", status_code=303)
+    response.delete_cookie(key="admin_session")
+    return response
+
+
+@router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+async def admin_page(request: Request):
+    """Admin dashboard page."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return RedirectResponse(url="/admin/login", status_code=303)
+    from kiro_gateway.pages import render_admin_page
+    return HTMLResponse(content=render_admin_page())
+
+
+@router.get("/admin/api/stats", include_in_schema=False)
+async def admin_get_stats(request: Request):
+    """Get admin statistics."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.metrics import metrics
+
+    stats = metrics.get_admin_stats()
+    # Add cached tokens count
+    stats["cached_tokens"] = auth_cache.size
+    # Map snake_case for frontend
+    return {
+        "total_requests": stats.get("totalRequests", 0),
+        "success_requests": stats.get("successRequests", 0),
+        "failed_requests": stats.get("failedRequests", 0),
+        "active_connections": stats.get("activeConnections", 0),
+        "token_valid": stats.get("tokenValid", False),
+        "site_enabled": stats.get("siteEnabled", True),
+        "banned_count": stats.get("bannedIPs", 0),
+        "cached_tokens": stats.get("cached_tokens", 0),
+        "cache_size": stats.get("cacheSize", 0),
+        "avg_latency": stats.get("avgLatency", 0),
+    }
+
+
+@router.get("/admin/api/ip-stats", include_in_schema=False)
+async def admin_get_ip_stats(request: Request):
+    """Get IP statistics."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.metrics import metrics
+    return metrics.get_ip_stats()
+
+
+@router.get("/admin/api/blacklist", include_in_schema=False)
+async def admin_get_blacklist(request: Request):
+    """Get IP blacklist."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.metrics import metrics
+    return metrics.get_blacklist()
+
+
+@router.post("/admin/api/ban-ip", include_in_schema=False)
+async def admin_ban_ip(request: Request, ip: str = Form(...), reason: str = Form("")):
+    """Ban an IP address."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.metrics import metrics
+    success = metrics.ban_ip(ip, reason)
+    return {"success": success}
+
+
+@router.post("/admin/api/unban-ip", include_in_schema=False)
+async def admin_unban_ip(request: Request, ip: str = Form(...)):
+    """Unban an IP address."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.metrics import metrics
+    success = metrics.unban_ip(ip)
+    return {"success": success}
+
+
+@router.post("/admin/api/toggle-site", include_in_schema=False)
+async def admin_toggle_site(request: Request, enabled: bool = Form(...)):
+    """Toggle site status."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.metrics import metrics
+    success = metrics.set_site_enabled(enabled)
+    return {"success": success, "enabled": enabled}
+
+
+@router.post("/admin/api/refresh-token", include_in_schema=False)
+async def admin_refresh_token(request: Request):
+    """Force refresh Kiro token."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    try:
+        from kiro_gateway.auth import global_auth_manager
+        if global_auth_manager:
+            await global_auth_manager.force_refresh()
+            return {"success": True, "message": "Token refreshed"}
+        return {"success": False, "message": "No auth manager available"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.post("/admin/api/clear-cache", include_in_schema=False)
+async def admin_clear_cache(request: Request):
+    """Clear model cache."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    try:
+        from kiro_gateway.cache import model_cache
+        await model_cache.refresh()
+        return {"success": True, "message": "Cache refreshed"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.get("/admin/api/tokens", include_in_schema=False)
+async def admin_get_tokens(request: Request):
+    """Get cached tokens list."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    tokens = []
+    for token, manager in auth_cache.cache.items():
+        masked = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "***"
+        tokens.append({
+            "token_id": token[:8],  # Use first 8 chars as ID
+            "masked_token": masked,
+            "has_access_token": bool(manager._access_token)
+        })
+    return {"tokens": tokens, "count": len(tokens)}
+
+
+@router.post("/admin/api/remove-token", include_in_schema=False)
+async def admin_remove_token(request: Request, token_id: str = Form(...)):
+    """Remove a cached token."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    # Find token by ID (first 8 chars)
+    for token in list(auth_cache.cache.keys()):
+        if token[:8] == token_id:
+            await auth_cache.remove(token)
+            return {"success": True}
+    return {"success": False, "message": "Token not found"}
+
+
+@router.post("/admin/api/clear-tokens", include_in_schema=False)
+async def admin_clear_tokens(request: Request):
+    """Clear all cached tokens."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    await auth_cache.clear()
+    return {"success": True}
+
+
+@router.get("/admin/api/users", include_in_schema=False)
+async def admin_get_users(request: Request):
+    """Get all registered users."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+    users = user_db.get_all_users()
+    return {
+        "users": [
+            {
+                "id": u.id,
+                "username": u.username,
+                "trust_level": u.trust_level,
+                "is_admin": u.is_admin,
+                "is_banned": u.is_banned,
+                "created_at": u.created_at,
+                "token_count": user_db.get_token_count(u.id)["total"],
+                "api_key_count": user_db.get_api_key_count(u.id),
+            }
+            for u in users
+        ]
+    }
+
+
+@router.post("/admin/api/users/ban", include_in_schema=False)
+async def admin_ban_user(request: Request, user_id: int = Form(...)):
+    """Ban a user."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.set_user_banned(user_id, True)
+    return {"success": success}
+
+
+@router.post("/admin/api/users/unban", include_in_schema=False)
+async def admin_unban_user(request: Request, user_id: int = Form(...)):
+    """Unban a user."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.set_user_banned(user_id, False)
+    return {"success": success}
+
+
+@router.get("/admin/api/donated-tokens", include_in_schema=False)
+async def admin_get_donated_tokens(request: Request):
+    """Get all donated tokens with statistics."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+    tokens = user_db.get_all_tokens_with_users()
+
+    total = len(tokens)
+    active = sum(1 for t in tokens if t["status"] == "active")
+    public = sum(1 for t in tokens if t["visibility"] == "public")
+    avg_success = sum(t["success_rate"] for t in tokens) / total if total > 0 else 0
+
+    return {
+        "total": total,
+        "active": active,
+        "public": public,
+        "avg_success_rate": avg_success * 100,
+        "tokens": tokens
+    }
+
+
+@router.post("/admin/api/donated-tokens/visibility", include_in_schema=False)
+async def admin_toggle_token_visibility(
+    request: Request,
+    token_id: int = Form(...),
+    visibility: str = Form(...)
+):
+    """Toggle token visibility."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.set_token_visibility(token_id, visibility)
+    return {"success": success}
+
+
+@router.post("/admin/api/donated-tokens/delete", include_in_schema=False)
+async def admin_delete_donated_token(request: Request, token_id: int = Form(...)):
+    """Delete a donated token (admin override)."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.admin_delete_token(token_id)
+    return {"success": success}
+
+
+# ==================== OAuth2 Routes (Hidden from Swagger) ====================
+
+@router.get("/oauth2/login", include_in_schema=False)
+async def oauth2_login():
+    """Redirect to LinuxDo OAuth2 authorization."""
+    from kiro_gateway.user_manager import user_manager
+
+    if not user_manager.oauth.is_configured:
+        return HTMLResponse(
+            content="<h1>OAuth2 未配置</h1><p>请在 .env 中配置 OAUTH_CLIENT_ID 和 OAUTH_CLIENT_SECRET</p>",
+            status_code=500
+        )
+
+    state = user_manager.session.create_oauth_state()
+    auth_url = user_manager.oauth.get_authorization_url(state)
+
+    response = RedirectResponse(url=auth_url, status_code=302)
+    response.set_cookie(
+        key="oauth_state",
+        value=state,
+        httponly=True,
+        max_age=600,  # 10 minutes
+        samesite="lax"
+    )
+    return response
+
+
+@router.get("/oauth2/callback", include_in_schema=False)
+async def oauth2_callback(request: Request, code: str = None, state: str = None):
+    """Handle OAuth2 callback from LinuxDo."""
+    from kiro_gateway.user_manager import user_manager
+
+    # Verify state
+    cookie_state = request.cookies.get("oauth_state")
+    if not state or state != cookie_state:
+        return HTMLResponse(content="<h1>错误</h1><p>无效的 state 参数</p>", status_code=400)
+
+    if not code:
+        return HTMLResponse(content="<h1>错误</h1><p>未收到授权码</p>", status_code=400)
+
+    # Complete OAuth2 flow
+    user, result = await user_manager.oauth_login(code)
+
+    if not user:
+        error_msg = result or "登录失败"
+        return HTMLResponse(content=f"<h1>错误</h1><p>{error_msg}</p>", status_code=400)
+
+    # Create session and redirect
+    response = RedirectResponse(url="/user", status_code=303)
+    response.set_cookie(
+        key="user_session",
+        value=result,  # session_token
+        httponly=True,
+        max_age=settings.user_session_max_age,
+        samesite="lax"
+    )
+    response.delete_cookie(key="oauth_state")
+    return response
+
+
+@router.get("/oauth2/logout", include_in_schema=False)
+async def oauth2_logout():
+    """User logout."""
+    response = RedirectResponse(url="/", status_code=303)
+    response.delete_cookie(key="user_session")
+    return response
+
+
+# ==================== GitHub OAuth2 Routes ====================
+
+@router.get("/login", response_class=HTMLResponse, include_in_schema=False)
+async def login_page():
+    """Login selection page with multiple OAuth2 providers."""
+    from kiro_gateway.pages import render_login_page
+    return HTMLResponse(content=render_login_page())
+
+
+@router.get("/oauth2/github/login", include_in_schema=False)
+async def github_oauth2_login():
+    """Redirect to GitHub OAuth2 authorization."""
+    from kiro_gateway.user_manager import user_manager
+
+    if not user_manager.github.is_configured:
+        return HTMLResponse(
+            content="<h1>GitHub OAuth2 未配置</h1><p>请在 .env 中配置 GITHUB_CLIENT_ID 和 GITHUB_CLIENT_SECRET</p>",
+            status_code=500
+        )
+
+    state = user_manager.session.create_oauth_state()
+    auth_url = user_manager.github.get_authorization_url(state)
+
+    response = RedirectResponse(url=auth_url, status_code=302)
+    response.set_cookie(
+        key="github_oauth_state",
+        value=state,
+        httponly=True,
+        max_age=600,  # 10 minutes
+        samesite="lax"
+    )
+    return response
+
+
+@router.get("/oauth2/github/callback", include_in_schema=False)
+async def github_oauth2_callback(request: Request, code: str = None, state: str = None):
+    """Handle OAuth2 callback from GitHub."""
+    from kiro_gateway.user_manager import user_manager
+
+    # Verify state
+    cookie_state = request.cookies.get("github_oauth_state")
+    if not state or state != cookie_state:
+        return HTMLResponse(content="<h1>错误</h1><p>无效的 state 参数</p>", status_code=400)
+
+    if not code:
+        return HTMLResponse(content="<h1>错误</h1><p>未收到授权码</p>", status_code=400)
+
+    # Complete GitHub OAuth2 flow
+    user, result = await user_manager.github_login(code)
+
+    if not user:
+        error_msg = result or "登录失败"
+        return HTMLResponse(content=f"<h1>错误</h1><p>{error_msg}</p>", status_code=400)
+
+    # Create session and redirect
+    response = RedirectResponse(url="/user", status_code=303)
+    response.set_cookie(
+        key="user_session",
+        value=result,  # session_token
+        httponly=True,
+        max_age=settings.user_session_max_age,
+        samesite="lax"
+    )
+    response.delete_cookie(key="github_oauth_state")
+    return response
+
+
+# ==================== User Routes (Hidden from Swagger) ====================
+
+def get_current_user(request: Request):
+    """Get current logged-in user from session."""
+    from kiro_gateway.user_manager import user_manager
+    session_token = request.cookies.get("user_session")
+    return user_manager.get_current_user(session_token) if session_token else None
+
+
+@router.get("/user", response_class=HTMLResponse, include_in_schema=False)
+async def user_page(request: Request):
+    """User dashboard page."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=303)
+    from kiro_gateway.pages import render_user_page
+    return HTMLResponse(content=render_user_page(user))
+
+
+@router.get("/user/api/profile", include_in_schema=False)
+async def user_get_profile(request: Request):
+    """Get current user profile."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.database import user_db
+    token_counts = user_db.get_token_count(user.id)
+    api_key_count = user_db.get_api_key_count(user.id)
+    return {
+        "id": user.id,
+        "username": user.username,
+        "avatar_url": user.avatar_url,
+        "trust_level": user.trust_level,
+        "is_admin": user.is_admin,
+        "token_count": token_counts["total"],
+        "public_token_count": token_counts["public"],
+        "api_key_count": api_key_count,
+    }
+
+
+@router.get("/user/api/tokens", include_in_schema=False)
+async def user_get_tokens(request: Request):
+    """Get user's tokens."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.database import user_db
+    tokens = user_db.get_user_tokens(user.id)
+    return {
+        "tokens": [
+            {
+                "id": t.id,
+                "visibility": t.visibility,
+                "status": t.status,
+                "success_count": t.success_count,
+                "fail_count": t.fail_count,
+                "success_rate": round(t.success_rate * 100, 1),
+                "last_used": t.last_used,
+                "created_at": t.created_at,
+            }
+            for t in tokens
+        ]
+    }
+
+
+@router.post("/user/api/tokens", include_in_schema=False)
+async def user_donate_token(
+    request: Request,
+    refresh_token: str = Form(...),
+    visibility: str = Form("private")
+):
+    """Donate a new token."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    if visibility not in ("public", "private"):
+        return JSONResponse(status_code=400, content={"error": "Invalid visibility"})
+
+    from kiro_gateway.database import user_db
+
+    # Validate token before saving
+    from kiro_gateway.auth import KiroAuthManager
+    from kiro_gateway.config import settings as cfg
+    try:
+        temp_manager = KiroAuthManager(
+            refresh_token=refresh_token,
+            region=cfg.region,
+            profile_arn=cfg.profile_arn
+        )
+        access_token = await temp_manager.get_access_token()
+        if not access_token:
+            return {"success": False, "message": "Token 验证失败：无法获取 access token"}
+    except Exception as e:
+        return {"success": False, "message": f"Token 验证失败：{str(e)}"}
+
+    # Save token
+    success, message = user_db.donate_token(user.id, refresh_token, visibility)
+    return {"success": success, "message": message}
+
+
+@router.put("/user/api/tokens/{token_id}", include_in_schema=False)
+async def user_update_token(
+    request: Request,
+    token_id: int,
+    visibility: str = Form(...)
+):
+    """Update token visibility."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+
+    # Verify ownership
+    token = user_db.get_token_by_id(token_id)
+    if not token or token.user_id != user.id:
+        return JSONResponse(status_code=404, content={"error": "Token not found"})
+
+    success = user_db.set_token_visibility(token_id, visibility)
+    return {"success": success}
+
+
+@router.delete("/user/api/tokens/{token_id}", include_in_schema=False)
+async def user_delete_token(request: Request, token_id: int):
+    """Delete a token."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.delete_token(token_id, user.id)
+    return {"success": success}
+
+
+@router.get("/user/api/keys", include_in_schema=False)
+async def user_get_keys(request: Request):
+    """Get user's API keys."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    from kiro_gateway.database import user_db
+    keys = user_db.get_user_api_keys(user.id)
+    return {
+        "keys": [
+            {
+                "id": k.id,
+                "key_prefix": k.key_prefix,
+                "name": k.name,
+                "is_active": k.is_active,
+                "request_count": k.request_count,
+                "last_used": k.last_used,
+                "created_at": k.created_at,
+            }
+            for k in keys
+        ]
+    }
+
+
+@router.post("/user/api/keys", include_in_schema=False)
+async def user_create_key(request: Request, name: str = Form("")):
+    """Generate a new API key."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+
+    # Check if user has at least one token
+    tokens = user_db.get_user_tokens(user.id)
+    active_tokens = [t for t in tokens if t.status == "active"]
+    if not active_tokens:
+        return {
+            "success": False,
+            "message": "需要至少一个有效的 Token 才能生成 API Key"
+        }
+
+    plain_key, api_key = user_db.generate_api_key(user.id, name or None)
+    return {
+        "success": True,
+        "key": plain_key,  # Only returned once!
+        "key_prefix": api_key.key_prefix,
+        "id": api_key.id,
+    }
+
+
+@router.delete("/user/api/keys/{key_id}", include_in_schema=False)
+async def user_delete_key(request: Request, key_id: int):
+    """Delete an API key."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.delete_api_key(key_id, user.id)
+    return {"success": success}
+
+
+# ==================== Public Token Pool ====================
+
+@router.get("/tokens", response_class=HTMLResponse, include_in_schema=False)
+async def public_tokens_page(request: Request):
+    """Public token pool page."""
+    from kiro_gateway.pages import render_tokens_page
+    user = get_current_user(request)
+    return HTMLResponse(content=render_tokens_page(user))
+
+
+@router.get("/api/public-tokens", include_in_schema=False)
+async def get_public_tokens():
+    """Get public tokens list (masked)."""
+    from kiro_gateway.database import user_db
+    tokens = user_db.get_public_tokens()
+    return {
+        "tokens": [
+            {
+                "id": t.id,
+                "success_rate": round(t.success_rate * 100, 1),
+                "last_used": t.last_used,
+            }
+            for t in tokens
+        ],
+        "count": len(tokens)
+    }

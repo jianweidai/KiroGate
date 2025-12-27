@@ -956,47 +956,230 @@ def render_dashboard_page() -> str:
     return f'''<!DOCTYPE html>
 <html lang="zh">
 <head>{COMMON_HEAD}
-<style>.mc{{background:var(--bg-card);border:1px solid var(--border);border-radius:.75rem;padding:1rem;text-align:center}}.mc:hover{{border-color:var(--primary)}}.mi{{font-size:1.5rem;margin-bottom:.5rem}}</style>
+<style>
+.mc{{background:var(--bg-card);border:1px solid var(--border);border-radius:.75rem;padding:1.25rem;text-align:center;transition:all .3s ease}}
+.mc:hover{{border-color:var(--primary);transform:translateY(-2px);box-shadow:0 8px 25px rgba(99,102,241,0.15)}}
+.mi{{font-size:1.75rem;margin-bottom:.75rem}}
+.stat-value{{font-size:1.75rem;font-weight:700;line-height:1.2}}
+.stat-label{{font-size:.75rem;margin-top:.5rem;opacity:.7}}
+.chart-card{{background:var(--bg-card);border:1px solid var(--border);border-radius:.75rem;padding:1.5rem}}
+.chart-title{{font-size:1rem;font-weight:600;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem}}
+</style>
 </head>
 <body>
   {COMMON_NAV}
   <main class="max-w-7xl mx-auto px-4 py-8">
-    <div class="flex justify-between items-center mb-6">
-      <h1 class="text-3xl font-bold">📊 Dashboard</h1>
-      <button onclick="refreshData()" class="btn-primary">🔄 刷新</button>
+    <div class="flex justify-between items-center mb-8">
+      <h1 class="text-3xl font-bold flex items-center gap-3">
+        <span class="text-4xl">📊</span>
+        <span>Dashboard</span>
+      </h1>
+      <button onclick="refreshData()" class="btn-primary flex items-center gap-2">
+        <span>🔄</span> 刷新
+      </button>
     </div>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-      <div class="mc"><div class="mi">📈</div><div class="text-2xl font-bold text-indigo-400" id="totalRequests">-</div><div class="text-xs" style="color:var(--text-muted)">总请求</div></div>
-      <div class="mc"><div class="mi">✅</div><div class="text-2xl font-bold text-green-400" id="successRate">-</div><div class="text-xs" style="color:var(--text-muted)">成功率</div></div>
-      <div class="mc"><div class="mi">⏱️</div><div class="text-2xl font-bold text-yellow-400" id="avgResponseTime">-</div><div class="text-xs" style="color:var(--text-muted)">平均耗时</div></div>
-      <div class="mc"><div class="mi">🕐</div><div class="text-2xl font-bold text-purple-400" id="uptime">-</div><div class="text-xs" style="color:var(--text-muted)">运行时长</div></div>
+
+    <!-- Primary Stats -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="mc">
+        <div class="mi">📈</div>
+        <div class="stat-value text-indigo-400" id="totalRequests">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">总请求</div>
+      </div>
+      <div class="mc">
+        <div class="mi">✅</div>
+        <div class="stat-value text-green-400" id="successRate">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">成功率</div>
+      </div>
+      <div class="mc">
+        <div class="mi">⏱️</div>
+        <div class="stat-value text-yellow-400" id="avgResponseTime">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">平均耗时</div>
+      </div>
+      <div class="mc">
+        <div class="mi">🕐</div>
+        <div class="stat-value text-purple-400" id="uptime">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">运行时长</div>
+      </div>
     </div>
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-      <div class="mc"><div class="mi">⚡</div><div class="text-xl font-bold text-blue-400" id="streamRequests">-</div><div class="text-xs" style="color:var(--text-muted)">流式请求</div></div>
-      <div class="mc"><div class="mi">💾</div><div class="text-xl font-bold text-cyan-400" id="nonStreamRequests">-</div><div class="text-xs" style="color:var(--text-muted)">非流式</div></div>
-      <div class="mc"><div class="mi">❌</div><div class="text-xl font-bold text-red-400" id="failedRequests">-</div><div class="text-xs" style="color:var(--text-muted)">失败</div></div>
-      <div class="mc"><div class="mi">🤖</div><div class="text-xl font-bold text-emerald-400" id="topModel">-</div><div class="text-xs" style="color:var(--text-muted)">热门模型</div></div>
+
+    <!-- Secondary Stats -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="mc">
+        <div class="mi">⚡</div>
+        <div class="stat-value text-blue-400" style="font-size:1.5rem" id="streamRequests">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">流式请求</div>
+      </div>
+      <div class="mc">
+        <div class="mi">💾</div>
+        <div class="stat-value text-cyan-400" style="font-size:1.5rem" id="nonStreamRequests">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">非流式请求</div>
+      </div>
+      <div class="mc">
+        <div class="mi">❌</div>
+        <div class="stat-value text-red-400" style="font-size:1.5rem" id="failedRequests">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">失败请求</div>
+      </div>
+      <div class="mc">
+        <div class="mi">🤖</div>
+        <div class="stat-value text-emerald-400" style="font-size:1.25rem" id="topModel">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">热门模型</div>
+      </div>
     </div>
-    <div class="grid grid-cols-2 gap-3 mb-6">
-      <div class="mc"><div class="mi">🟢</div><div class="text-xl font-bold text-green-400" id="openaiRequests">-</div><div class="text-xs" style="color:var(--text-muted)">OpenAI API</div></div>
-      <div class="mc"><div class="mi">🟣</div><div class="text-xl font-bold text-purple-400" id="anthropicRequests">-</div><div class="text-xs" style="color:var(--text-muted)">Anthropic API</div></div>
+
+    <!-- API Type Stats -->
+    <div class="grid grid-cols-2 gap-4 mb-8">
+      <div class="mc">
+        <div class="mi">🟢</div>
+        <div class="stat-value text-green-400" style="font-size:1.5rem" id="openaiRequests">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">OpenAI API</div>
+      </div>
+      <div class="mc">
+        <div class="mi">🟣</div>
+        <div class="stat-value text-purple-400" style="font-size:1.5rem" id="anthropicRequests">-</div>
+        <div class="stat-label" style="color:var(--text-muted)">Anthropic API</div>
+      </div>
     </div>
-    <div class="grid lg:grid-cols-2 gap-4 mb-6">
-      <div class="card"><h2 class="text-lg font-semibold mb-3">📈 耗时趋势</h2><div id="latencyChart" style="height:250px"></div></div>
-      <div class="card"><h2 class="text-lg font-semibold mb-3">📊 状态分布</h2><div style="height:250px;position:relative"><canvas id="statusChart"></canvas></div></div>
+
+    <!-- Charts -->
+    <div class="grid lg:grid-cols-2 gap-6 mb-8">
+      <div class="chart-card">
+        <h2 class="chart-title">📈 24小时请求趋势</h2>
+        <div id="latencyChart" style="height:280px"></div>
+      </div>
+      <div class="chart-card">
+        <h2 class="chart-title">📊 状态分布</h2>
+        <div style="height:280px;position:relative">
+          <canvas id="statusChart"></canvas>
+        </div>
+      </div>
     </div>
-    <div class="card">
-      <h2 class="text-lg font-semibold mb-3">📋 最近请求</h2>
-      <div class="table-responsive"><table class="w-full text-xs"><thead><tr class="text-left" style="color:var(--text-muted);border-bottom:1px solid var(--border)"><th class="py-2 px-2">时间</th><th class="py-2 px-2">API</th><th class="py-2 px-2">路径</th><th class="py-2 px-2">状态</th><th class="py-2 px-2">耗时</th><th class="py-2 px-2">模型</th></tr></thead><tbody id="recentRequestsTable"><tr><td colspan="6" class="py-4 text-center" style="color:var(--text-muted)">加载中...</td></tr></tbody></table></div>
+
+    <!-- Recent Requests -->
+    <div class="chart-card">
+      <h2 class="chart-title">📋 最近请求</h2>
+      <div class="table-responsive">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left" style="color:var(--text-muted);border-bottom:1px solid var(--border)">
+              <th class="py-3 px-3">时间</th>
+              <th class="py-3 px-3">API</th>
+              <th class="py-3 px-3">路径</th>
+              <th class="py-3 px-3">状态</th>
+              <th class="py-3 px-3">耗时</th>
+              <th class="py-3 px-3">模型</th>
+            </tr>
+          </thead>
+          <tbody id="recentRequestsTable">
+            <tr><td colspan="6" class="py-6 text-center" style="color:var(--text-muted)">加载中...</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </main>
   {COMMON_FOOTER}
   <script>
 let lc,sc;
-async function refreshData(){{try{{const r=await fetch('/api/metrics'),d=await r.json();document.getElementById('totalRequests').textContent=d.totalRequests||0;document.getElementById('successRate').textContent=d.totalRequests>0?((d.successRequests/d.totalRequests)*100).toFixed(1)+'%':'0%';document.getElementById('avgResponseTime').textContent=(d.avgResponseTime||0).toFixed(0)+'ms';const u=Math.floor((Date.now()-d.startTime)/1000);document.getElementById('uptime').textContent=Math.floor(u/3600)+'h '+Math.floor((u%3600)/60)+'m';document.getElementById('streamRequests').textContent=d.streamRequests||0;document.getElementById('nonStreamRequests').textContent=d.nonStreamRequests||0;document.getElementById('failedRequests').textContent=d.failedRequests||0;const m=Object.entries(d.modelUsage||{{}}).sort((a,b)=>b[1]-a[1])[0];document.getElementById('topModel').textContent=m?m[0].split('-').slice(-2).join('-'):'-';document.getElementById('openaiRequests').textContent=(d.apiTypeUsage||{{}}).openai||0;document.getElementById('anthropicRequests').textContent=(d.apiTypeUsage||{{}}).anthropic||0;const rt=d.responseTimes||[];lc.setOption({{xAxis:{{data:rt.map((_,i)=>i+1)}},series:[{{data:rt}}]}});sc.data.datasets[0].data=[d.successRequests||0,d.failedRequests||0];sc.update();const rq=(d.recentRequests||[]).slice(-10).reverse(),tb=document.getElementById('recentRequestsTable');tb.innerHTML=rq.length?rq.map(q=>'<tr style="border-bottom:1px solid var(--border)"><td class="py-2 px-2">'+new Date(q.timestamp).toLocaleTimeString()+'</td><td class="py-2 px-2"><span class="text-xs px-1 rounded '+(q.apiType==='anthropic'?'bg-purple-600':'bg-green-600')+' text-white">'+q.apiType+'</span></td><td class="py-2 px-2 font-mono">'+q.path+'</td><td class="py-2 px-2 '+(q.status<400?'text-green-400':'text-red-400')+'">'+q.status+'</td><td class="py-2 px-2">'+q.duration.toFixed(0)+'ms</td><td class="py-2 px-2">'+(q.model||'-')+'</td></tr>').join(''):'<tr><td colspan="6" class="py-4 text-center" style="color:var(--text-muted)">暂无</td></tr>'}}catch(e){{console.error(e)}}}}
-lc=echarts.init(document.getElementById('latencyChart'));lc.setOption({{tooltip:{{trigger:'axis'}},xAxis:{{type:'category',data:[],axisLabel:{{color:'#94a3b8'}}}},yAxis:{{type:'value',name:'ms',axisLabel:{{color:'#94a3b8'}}}},series:[{{type:'line',smooth:true,data:[],areaStyle:{{color:'rgba(99,102,241,0.2)'}},lineStyle:{{color:'#6366f1'}}}}]}});
-sc=new Chart(document.getElementById('statusChart'),{{type:'doughnut',data:{{labels:['成功','失败'],datasets:[{{data:[0,0],backgroundColor:['#22c55e','#ef4444'],borderWidth:0}}]}},options:{{responsive:true,maintainAspectRatio:false,plugins:{{legend:{{position:'bottom',labels:{{color:'#94a3b8'}}}}}}}}}});
-refreshData();setInterval(refreshData,5000);window.addEventListener('resize',()=>lc.resize());
+const START_TIME = new Date('2025-12-25T00:00:00').getTime();
+async function refreshData(){{
+  try{{
+    const r=await fetch('/api/metrics'),d=await r.json();
+    document.getElementById('totalRequests').textContent=d.totalRequests||0;
+    document.getElementById('successRate').textContent=d.totalRequests>0?((d.successRequests/d.totalRequests)*100).toFixed(1)+'%':'0%';
+    document.getElementById('avgResponseTime').textContent=(d.avgResponseTime||0).toFixed(0)+'ms';
+
+    // Calculate uptime from fixed start time
+    const now=Date.now();
+    const u=Math.floor((now-START_TIME)/1000);
+    const days=Math.floor(u/86400);
+    const hours=Math.floor((u%86400)/3600);
+    const mins=Math.floor((u%3600)/60);
+    document.getElementById('uptime').textContent=days>0?days+'d '+hours+'h':hours+'h '+mins+'m';
+
+    document.getElementById('streamRequests').textContent=d.streamRequests||0;
+    document.getElementById('nonStreamRequests').textContent=d.nonStreamRequests||0;
+    document.getElementById('failedRequests').textContent=d.failedRequests||0;
+
+    const m=Object.entries(d.modelUsage||{{}}).filter(e=>e[0]!=='unknown').sort((a,b)=>b[1]-a[1])[0];
+    const formatModel=(name)=>{{
+      if(!name)return'-';
+      let n=name.replace(/-\\d{{8}}$/,'');
+      const parts=n.split('-');
+      if(parts.length<=2)return n;
+      if(n.includes('claude')){{
+        const ver=parts.filter(p=>/^\\d+$/.test(p)).join('.');
+        const type=parts.find(p=>['opus','sonnet','haiku'].includes(p))||parts[parts.length-1];
+        return ver?type+'-'+ver:type;
+      }}
+      return parts.slice(-2).join('-');
+    }};
+    document.getElementById('topModel').textContent=m?formatModel(m[0]):'-';
+    document.getElementById('openaiRequests').textContent=(d.apiTypeUsage||{{}}).openai||0;
+    document.getElementById('anthropicRequests').textContent=(d.apiTypeUsage||{{}}).anthropic||0;
+
+    // Update 24-hour chart
+    const hr=d.hourlyRequests||[];
+    lc.setOption({{
+      xAxis:{{data:hr.map(h=>new Date(h.hour).getHours()+':00')}},
+      series:[{{data:hr.map(h=>h.count)}}]
+    }});
+
+    sc.data.datasets[0].data=[d.successRequests||0,d.failedRequests||0];
+    sc.update();
+
+    const rq=(d.recentRequests||[]).slice(-10).reverse();
+    const tb=document.getElementById('recentRequestsTable');
+    tb.innerHTML=rq.length?rq.map(q=>`
+      <tr style="border-bottom:1px solid var(--border)">
+        <td class="py-3 px-3">${{new Date(q.timestamp).toLocaleTimeString()}}</td>
+        <td class="py-3 px-3"><span class="text-xs px-2 py-1 rounded ${{q.apiType==='anthropic'?'bg-purple-600':'bg-green-600'}} text-white">${{q.apiType}}</span></td>
+        <td class="py-3 px-3 font-mono text-xs">${{q.path}}</td>
+        <td class="py-3 px-3 ${{q.status<400?'text-green-400':'text-red-400'}}">${{q.status}}</td>
+        <td class="py-3 px-3">${{q.duration.toFixed(0)}}ms</td>
+        <td class="py-3 px-3">${{q.model||'-'}}</td>
+      </tr>`).join(''):'<tr><td colspan="6" class="py-6 text-center" style="color:var(--text-muted)">暂无请求</td></tr>';
+  }}catch(e){{console.error(e)}}
+}}
+
+lc=echarts.init(document.getElementById('latencyChart'));
+lc.setOption({{
+  tooltip:{{trigger:'axis',backgroundColor:'rgba(30,41,59,0.95)',borderColor:'#334155',textStyle:{{color:'#e2e8f0'}}}},
+  grid:{{left:'3%',right:'4%',bottom:'3%',containLabel:true}},
+  xAxis:{{type:'category',data:[],axisLabel:{{color:'#94a3b8',fontSize:11}},axisLine:{{lineStyle:{{color:'#334155'}}}}}},
+  yAxis:{{type:'value',name:'请求数',nameTextStyle:{{color:'#94a3b8'}},axisLabel:{{color:'#94a3b8'}},axisLine:{{lineStyle:{{color:'#334155'}}}},splitLine:{{lineStyle:{{color:'#1e293b'}}}}}},
+  series:[{{
+    type:'bar',
+    data:[],
+    itemStyle:{{
+      color:new echarts.graphic.LinearGradient(0,0,0,1,[
+        {{offset:0,color:'#818cf8'}},
+        {{offset:1,color:'#6366f1'}}
+      ]),
+      borderRadius:[4,4,0,0]
+    }},
+    emphasis:{{itemStyle:{{color:'#a5b4fc'}}}}
+  }}]
+}});
+
+sc=new Chart(document.getElementById('statusChart'),{{
+  type:'doughnut',
+  data:{{
+    labels:['成功','失败'],
+    datasets:[{{data:[0,0],backgroundColor:['#22c55e','#ef4444'],borderWidth:0,hoverOffset:8}}]
+  }},
+  options:{{
+    responsive:true,
+    maintainAspectRatio:false,
+    cutout:'65%',
+    plugins:{{
+      legend:{{position:'bottom',labels:{{color:'#94a3b8',padding:20,font:{{size:13}}}}}}
+    }}
+  }}
+}});
+
+refreshData();
+setInterval(refreshData,5000);
+window.addEventListener('resize',()=>lc.resize());
   </script>
 </body>
 </html>'''
@@ -1007,55 +1190,26 @@ def render_swagger_page() -> str:
     return f'''<!DOCTYPE html>
 <html lang="zh">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>KiroGate API - Swagger UI</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+  {COMMON_HEAD}
   <link rel="stylesheet" href="{PROXY_BASE}/proxy/cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
   <style>
-    body {{ margin: 0; background: #fafafa; }}
     .swagger-ui .topbar {{ display: none; }}
-    .custom-header {{
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
-      color: white;
-      padding: 1rem 2rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }}
-    .custom-header h1 {{ margin: 0; font-size: 1.5rem; font-weight: bold; }}
-    .custom-header a {{ color: white; text-decoration: none; opacity: 0.8; }}
-    .custom-header a:hover {{ opacity: 1; }}
-    .header-links {{ display: flex; gap: 1.5rem; align-items: center; }}
-    .header-links a {{ font-size: 0.9rem; }}
-    .version-badge {{
-      background: rgba(255,255,255,0.2);
-      padding: 0.25rem 0.5rem;
-      border-radius: 0.25rem;
-      font-size: 0.8rem;
-    }}
-    /* Swagger UI 主题调整 */
     .swagger-ui .info .title {{ font-size: 2rem; }}
     .swagger-ui .opblock-tag {{ font-size: 1.2rem; }}
     .swagger-ui .opblock.opblock-post {{ border-color: #49cc90; background: rgba(73, 204, 144, 0.1); }}
     .swagger-ui .opblock.opblock-get {{ border-color: #61affe; background: rgba(97, 175, 254, 0.1); }}
+    .swagger-ui {{ background: var(--bg); }}
+    .swagger-ui .info .title, .swagger-ui .info .base-url {{ color: var(--text); }}
+    .swagger-ui .opblock-tag {{ color: var(--text); }}
+    .swagger-ui .opblock-summary-description {{ color: var(--text-muted); }}
   </style>
 </head>
 <body>
-  <div class="custom-header">
-    <div style="display: flex; align-items: center; gap: 1rem;">
-      <h1>⚡ KiroGate API</h1>
-      <span class="version-badge">v{APP_VERSION}</span>
-    </div>
-    <div class="header-links">
-      <a href="/">首页</a>
-      <a href="/docs">文档</a>
-      <a href="/playground">Playground</a>
-      <a href="/dashboard">Dashboard</a>
-      <a href="https://github.com/dext7r/KiroGate" target="_blank">GitHub</a>
-    </div>
-  </div>
-  <div id="swagger-ui"></div>
+  {COMMON_NAV}
+  <main class="max-w-7xl mx-auto px-4 py-6">
+    <div id="swagger-ui"></div>
+  </main>
+  {COMMON_FOOTER}
   <script src="{PROXY_BASE}/proxy/cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
   <script>
     window.onload = function() {{
@@ -1081,5 +1235,1067 @@ def render_swagger_page() -> str:
       }});
     }}
   </script>
+</body>
+</html>'''
+
+
+def render_admin_login_page(error: str = "") -> str:
+    """Render the admin login page."""
+    error_html = f'<div class="bg-red-500/20 border border-red-500 text-red-400 px-4 py-3 rounded-lg mb-4">{error}</div>' if error else ''
+
+    return f'''<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Login - KiroGate</title>
+  <meta name="robots" content="noindex, nofollow">
+  <script src="{PROXY_BASE}/proxy/cdn.tailwindcss.com"></script>
+  <style>
+    :root {{ --bg-main: #0f172a; --bg-card: #1e293b; --text: #e2e8f0; --border: #334155; --primary: #6366f1; }}
+    body {{ background: var(--bg-main); color: var(--text); font-family: system-ui, sans-serif; min-height: 100vh; display: flex; align-items: center; justify-content: center; }}
+  </style>
+</head>
+<body>
+  <div class="w-full max-w-md px-6">
+    <div style="background: var(--bg-card); border: 1px solid var(--border);" class="rounded-xl p-8 shadow-2xl">
+      <div class="text-center mb-8">
+        <span class="text-4xl">🔐</span>
+        <h1 class="text-2xl font-bold mt-4">Admin Login</h1>
+        <p class="text-sm mt-2" style="color: #94a3b8;">KiroGate 管理后台</p>
+      </div>
+
+      {error_html}
+
+      <form action="/admin/login" method="POST" class="space-y-6">
+        <div>
+          <label class="block text-sm mb-2" style="color: #94a3b8;">管理员密码</label>
+          <input type="password" name="password" required autofocus
+            class="w-full px-4 py-3 rounded-lg border focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            style="background: var(--bg-main); border-color: var(--border); color: var(--text);"
+            placeholder="请输入管理员密码">
+        </div>
+        <button type="submit" class="w-full py-3 rounded-lg font-semibold text-white transition-all hover:opacity-90"
+          style="background: var(--primary);">
+          登 录
+        </button>
+      </form>
+
+      <div class="mt-6 text-center">
+        <a href="/" class="text-sm hover:underline" style="color: #6366f1;">← 返回首页</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>'''
+
+
+def render_admin_page() -> str:
+    """Render the admin dashboard page."""
+    return f'''<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Dashboard - KiroGate</title>
+  <meta name="robots" content="noindex, nofollow">
+  <script src="{PROXY_BASE}/proxy/cdn.tailwindcss.com"></script>
+  <style>
+    :root {{ --bg-main: #0f172a; --bg-card: #1e293b; --bg-input: #334155; --text: #e2e8f0; --text-muted: #94a3b8; --border: #334155; --primary: #6366f1; }}
+    body {{ background: var(--bg-main); color: var(--text); font-family: system-ui, sans-serif; }}
+    .card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: .75rem; padding: 1.5rem; }}
+    .btn {{ padding: .5rem 1rem; border-radius: .5rem; font-weight: 500; transition: all .2s; cursor: pointer; }}
+    .btn-primary {{ background: var(--primary); color: white; }}
+    .btn-primary:hover {{ opacity: .9; }}
+    .btn-danger {{ background: #ef4444; color: white; }}
+    .btn-danger:hover {{ opacity: .9; }}
+    .btn-success {{ background: #22c55e; color: white; }}
+    .btn-success:hover {{ opacity: .9; }}
+    .tab {{ padding: .75rem 1.25rem; cursor: pointer; border-bottom: 2px solid transparent; transition: all .2s; }}
+    .tab:hover {{ color: var(--primary); }}
+    .tab.active {{ color: var(--primary); border-bottom-color: var(--primary); }}
+    .table-row {{ border-bottom: 1px solid var(--border); }}
+    .table-row:hover {{ background: rgba(99,102,241,0.05); }}
+    .switch {{ position: relative; width: 50px; height: 26px; }}
+    .switch input {{ opacity: 0; width: 0; height: 0; }}
+    .slider {{ position: absolute; cursor: pointer; inset: 0; background: #475569; border-radius: 26px; transition: .3s; }}
+    .slider:before {{ content: ""; position: absolute; height: 20px; width: 20px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .3s; }}
+    input:checked + .slider {{ background: #22c55e; }}
+    input:checked + .slider:before {{ transform: translateX(24px); }}
+    .status-dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; }}
+    .status-ok {{ background: #22c55e; }}
+    .status-error {{ background: #ef4444; }}
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header style="background: var(--bg-card); border-bottom: 1px solid var(--border);" class="sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+      <div class="flex items-center gap-4">
+        <span class="text-2xl">🛡️</span>
+        <h1 class="text-xl font-bold">Admin Dashboard</h1>
+      </div>
+      <a href="/admin/logout" class="btn btn-danger text-sm">退出登录</a>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 py-6">
+    <!-- Status Cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="card text-center">
+        <div class="text-2xl mb-2" id="siteIcon">🟢</div>
+        <div class="flex items-center justify-center gap-2">
+          <label class="switch" style="transform: scale(0.8);">
+            <input type="checkbox" id="siteToggleQuick" checked onchange="toggleSite(this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="text-sm mt-2" style="color: var(--text-muted);">站点开关</div>
+      </div>
+      <div class="card text-center">
+        <div class="text-2xl mb-2">🔑</div>
+        <div class="text-2xl font-bold" id="tokenStatus">-</div>
+        <div class="text-sm" style="color: var(--text-muted);">Token 状态</div>
+      </div>
+      <div class="card text-center">
+        <div class="text-2xl mb-2">📊</div>
+        <div class="text-2xl font-bold" id="totalRequests">-</div>
+        <div class="text-sm" style="color: var(--text-muted);">总请求数</div>
+      </div>
+      <div class="card text-center">
+        <div class="text-2xl mb-2">👥</div>
+        <div class="text-2xl font-bold" id="cachedTokens">-</div>
+        <div class="text-sm" style="color: var(--text-muted);">缓存用户</div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="flex flex-wrap border-b mb-6" style="border-color: var(--border);">
+      <div class="tab active" onclick="showTab('overview')">📈 概览</div>
+      <div class="tab" onclick="showTab('users')">👥 用户</div>
+      <div class="tab" onclick="showTab('donated-tokens')">🎁 Token 池</div>
+      <div class="tab" onclick="showTab('ip-stats')">🌐 IP 统计</div>
+      <div class="tab" onclick="showTab('blacklist')">🚫 黑名单</div>
+      <div class="tab" onclick="showTab('tokens')">🔑 缓存</div>
+      <div class="tab" onclick="showTab('system')">⚙️ 系统</div>
+    </div>
+
+    <!-- Tab Content: Overview -->
+    <div id="tab-overview" class="tab-content">
+      <div class="card">
+        <h2 class="text-lg font-semibold mb-4">📊 实时统计</h2>
+        <div class="grid md:grid-cols-3 gap-4">
+          <div style="background: var(--bg-input);" class="p-4 rounded-lg">
+            <div class="text-sm" style="color: var(--text-muted);">成功率</div>
+            <div class="text-2xl font-bold text-green-400" id="successRate">-</div>
+          </div>
+          <div style="background: var(--bg-input);" class="p-4 rounded-lg">
+            <div class="text-sm" style="color: var(--text-muted);">平均响应时间</div>
+            <div class="text-2xl font-bold text-yellow-400" id="avgLatency">-</div>
+          </div>
+          <div style="background: var(--bg-input);" class="p-4 rounded-lg">
+            <div class="text-sm" style="color: var(--text-muted);">活跃连接</div>
+            <div class="text-2xl font-bold text-blue-400" id="activeConns">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Content: Users -->
+    <div id="tab-users" class="tab-content hidden">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-lg font-semibold">👥 注册用户管理</h2>
+          <button onclick="refreshUsers()" class="btn btn-primary text-sm">刷新</button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr style="color: var(--text-muted); border-bottom: 1px solid var(--border);">
+                <th class="text-left py-3 px-3">ID</th>
+                <th class="text-left py-3 px-3">用户名</th>
+                <th class="text-left py-3 px-3">信任等级</th>
+                <th class="text-left py-3 px-3">Token 数</th>
+                <th class="text-left py-3 px-3">API Key</th>
+                <th class="text-left py-3 px-3">状态</th>
+                <th class="text-left py-3 px-3">注册时间</th>
+                <th class="text-left py-3 px-3">操作</th>
+              </tr>
+            </thead>
+            <tbody id="usersTable">
+              <tr><td colspan="8" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Content: Donated Tokens -->
+    <div id="tab-donated-tokens" class="tab-content hidden">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-lg font-semibold">🎁 捐献 Token 池</h2>
+          <button onclick="refreshDonatedTokens()" class="btn btn-primary text-sm">刷新</button>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <div style="background: var(--bg-input);" class="p-3 rounded-lg text-center">
+            <div class="text-xl font-bold text-green-400" id="poolTotalTokens">-</div>
+            <div class="text-xs" style="color: var(--text-muted);">总 Token</div>
+          </div>
+          <div style="background: var(--bg-input);" class="p-3 rounded-lg text-center">
+            <div class="text-xl font-bold text-blue-400" id="poolActiveTokens">-</div>
+            <div class="text-xs" style="color: var(--text-muted);">有效</div>
+          </div>
+          <div style="background: var(--bg-input);" class="p-3 rounded-lg text-center">
+            <div class="text-xl font-bold text-purple-400" id="poolPublicTokens">-</div>
+            <div class="text-xs" style="color: var(--text-muted);">公开</div>
+          </div>
+          <div style="background: var(--bg-input);" class="p-3 rounded-lg text-center">
+            <div class="text-xl font-bold text-yellow-400" id="poolAvgSuccessRate">-</div>
+            <div class="text-xs" style="color: var(--text-muted);">平均成功率</div>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr style="color: var(--text-muted); border-bottom: 1px solid var(--border);">
+                <th class="text-left py-3 px-3">ID</th>
+                <th class="text-left py-3 px-3">所有者</th>
+                <th class="text-left py-3 px-3">可见性</th>
+                <th class="text-left py-3 px-3">状态</th>
+                <th class="text-left py-3 px-3">成功率</th>
+                <th class="text-left py-3 px-3">使用次数</th>
+                <th class="text-left py-3 px-3">最后使用</th>
+                <th class="text-left py-3 px-3">操作</th>
+              </tr>
+            </thead>
+            <tbody id="donatedTokensTable">
+              <tr><td colspan="8" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Content: IP Stats -->
+    <div id="tab-ip-stats" class="tab-content hidden">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-lg font-semibold">🌐 IP 请求统计</h2>
+          <button onclick="refreshIpStats()" class="btn btn-primary text-sm">刷新</button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr style="color: var(--text-muted); border-bottom: 1px solid var(--border);">
+                <th class="text-left py-3 px-3">IP 地址</th>
+                <th class="text-left py-3 px-3">请求次数</th>
+                <th class="text-left py-3 px-3">最后访问</th>
+                <th class="text-left py-3 px-3">操作</th>
+              </tr>
+            </thead>
+            <tbody id="ipStatsTable">
+              <tr><td colspan="4" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Content: Blacklist -->
+    <div id="tab-blacklist" class="tab-content hidden">
+      <div class="card">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-lg font-semibold">🚫 IP 黑名单</h2>
+          <div class="flex gap-2">
+            <input type="text" id="banIpInput" placeholder="输入 IP 地址"
+              class="px-3 py-2 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+            <button onclick="banIp()" class="btn btn-danger text-sm">封禁</button>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr style="color: var(--text-muted); border-bottom: 1px solid var(--border);">
+                <th class="text-left py-3 px-3">IP 地址</th>
+                <th class="text-left py-3 px-3">封禁时间</th>
+                <th class="text-left py-3 px-3">原因</th>
+                <th class="text-left py-3 px-3">操作</th>
+              </tr>
+            </thead>
+            <tbody id="blacklistTable">
+              <tr><td colspan="4" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Content: Token Management -->
+    <div id="tab-tokens" class="tab-content hidden">
+      <div class="card mb-6">
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-lg font-semibold">🔑 缓存的用户 Token</h2>
+          <div class="flex gap-2">
+            <button onclick="refreshTokenList()" class="btn btn-primary text-sm">刷新</button>
+            <button onclick="clearAllTokens()" class="btn btn-danger text-sm">清空全部</button>
+          </div>
+        </div>
+        <p class="text-sm mb-4" style="color: var(--text-muted);">
+          多租户模式下，每个用户的 REFRESH_TOKEN 会被缓存以提升性能。最多缓存 100 个用户。
+        </p>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr style="color: var(--text-muted); border-bottom: 1px solid var(--border);">
+                <th class="text-left py-3 px-3">#</th>
+                <th class="text-left py-3 px-3">Token (已脱敏)</th>
+                <th class="text-left py-3 px-3">状态</th>
+                <th class="text-left py-3 px-3">操作</th>
+              </tr>
+            </thead>
+            <tbody id="tokenListTable">
+              <tr><td colspan="4" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="text-lg font-semibold mb-4">📊 Token 使用统计</h2>
+        <div class="grid md:grid-cols-2 gap-4">
+          <div style="background: var(--bg-input);" class="p-4 rounded-lg">
+            <div class="text-sm" style="color: var(--text-muted);">全局 Token 状态</div>
+            <div class="text-xl font-bold mt-1" id="globalTokenStatus">-</div>
+          </div>
+          <div style="background: var(--bg-input);" class="p-4 rounded-lg">
+            <div class="text-sm" style="color: var(--text-muted);">缓存用户数</div>
+            <div class="text-xl font-bold mt-1" id="cachedUsersCount">-</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab Content: System -->
+    <div id="tab-system" class="tab-content hidden">
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="card">
+          <h2 class="text-lg font-semibold mb-4">⚙️ 站点控制</h2>
+          <div class="flex items-center justify-between p-4 rounded-lg" style="background: var(--bg-input);">
+            <div>
+              <div class="font-medium">站点开关</div>
+              <div class="text-sm" style="color: var(--text-muted);">关闭后所有 API 请求返回 503</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="siteToggle" onchange="toggleSite(this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="text-lg font-semibold mb-4">🔧 系统操作</h2>
+          <div class="space-y-3">
+            <button onclick="refreshToken()" class="w-full btn btn-primary flex items-center justify-center gap-2">
+              <span>🔄</span> 刷新 Kiro Token
+            </button>
+            <button onclick="clearCache()" class="w-full btn flex items-center justify-center gap-2"
+              style="background: var(--bg-input); border: 1px solid var(--border);">
+              <span>🗑️</span> 清除模型缓存
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mt-6">
+        <h2 class="text-lg font-semibold mb-4">📋 系统信息</h2>
+        <div class="grid md:grid-cols-2 gap-4 text-sm">
+          <div class="flex justify-between p-3 rounded" style="background: var(--bg-input);">
+            <span style="color: var(--text-muted);">版本</span>
+            <span class="font-mono">{APP_VERSION}</span>
+          </div>
+          <div class="flex justify-between p-3 rounded" style="background: var(--bg-input);">
+            <span style="color: var(--text-muted);">缓存大小</span>
+            <span class="font-mono" id="cacheSize">-</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    let currentTab = 'overview';
+    const allTabs = ['overview','users','donated-tokens','ip-stats','blacklist','tokens','system'];
+
+    function showTab(tab) {{
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+      document.querySelector(`.tab:nth-child(${{allTabs.indexOf(tab)+1}})`).classList.add('active');
+      document.getElementById('tab-' + tab).classList.remove('hidden');
+      currentTab = tab;
+      if (tab === 'users') refreshUsers();
+      if (tab === 'donated-tokens') refreshDonatedTokens();
+      if (tab === 'ip-stats') refreshIpStats();
+      if (tab === 'blacklist') refreshBlacklist();
+      if (tab === 'tokens') refreshTokenList();
+    }}
+
+    async function refreshStats() {{
+      try {{
+        const r = await fetch('/admin/api/stats');
+        const d = await r.json();
+        // Site toggle and icon
+        const siteEnabled = d.site_enabled;
+        document.getElementById('siteIcon').textContent = siteEnabled ? '🟢' : '🔴';
+        document.getElementById('siteToggleQuick').checked = siteEnabled;
+        document.getElementById('siteToggle').checked = siteEnabled;
+        // Token status
+        document.getElementById('tokenStatus').innerHTML = d.token_valid ? '<span class="text-green-400">有效</span>' : '<span class="text-yellow-400">未知</span>';
+        document.getElementById('totalRequests').textContent = d.total_requests || 0;
+        document.getElementById('cachedTokens').textContent = d.cached_tokens || 0;
+        document.getElementById('successRate').textContent = d.total_requests > 0 ? ((d.success_requests / d.total_requests) * 100).toFixed(1) + '%' : '0%';
+        document.getElementById('avgLatency').textContent = (d.avg_latency || 0).toFixed(0) + 'ms';
+        document.getElementById('activeConns').textContent = d.active_connections || 0;
+        document.getElementById('cacheSize').textContent = d.cache_size || 0;
+        // Token tab stats
+        document.getElementById('globalTokenStatus').innerHTML = d.token_valid ? '<span class="text-green-400">有效</span>' : '<span class="text-yellow-400">未配置/未知</span>';
+        document.getElementById('cachedUsersCount').textContent = (d.cached_tokens || 0) + ' / 100';
+      }} catch (e) {{ console.error(e); }}
+    }}
+
+    async function refreshIpStats() {{
+      try {{
+        const r = await fetch('/admin/api/ip-stats');
+        const d = await r.json();
+        const tb = document.getElementById('ipStatsTable');
+        if (!d.length) {{
+          tb.innerHTML = '<tr><td colspan="4" class="py-6 text-center" style="color: var(--text-muted);">暂无数据</td></tr>';
+          return;
+        }}
+        tb.innerHTML = d.slice(0, 50).map(ip => `
+          <tr class="table-row">
+            <td class="py-3 px-3 font-mono">${{ip.ip}}</td>
+            <td class="py-3 px-3">${{ip.count}}</td>
+            <td class="py-3 px-3">${{ip.last_seen ? new Date(ip.last_seen * 1000).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3">
+              <button onclick="banIpDirect('${{ip.ip}}')" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30">封禁</button>
+            </td>
+          </tr>
+        `).join('');
+      }} catch (e) {{ console.error(e); }}
+    }}
+
+    async function refreshBlacklist() {{
+      try {{
+        const r = await fetch('/admin/api/blacklist');
+        const d = await r.json();
+        const tb = document.getElementById('blacklistTable');
+        if (!d.length) {{
+          tb.innerHTML = '<tr><td colspan="4" class="py-6 text-center" style="color: var(--text-muted);">黑名单为空</td></tr>';
+          return;
+        }}
+        tb.innerHTML = d.map(ip => `
+          <tr class="table-row">
+            <td class="py-3 px-3 font-mono">${{ip.ip}}</td>
+            <td class="py-3 px-3">${{ip.banned_at ? new Date(ip.banned_at * 1000).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3">${{ip.reason || '-'}}</td>
+            <td class="py-3 px-3">
+              <button onclick="unbanIp('${{ip.ip}}')" class="text-xs px-2 py-1 rounded bg-green-500/20 text-green-400 hover:bg-green-500/30">解封</button>
+            </td>
+          </tr>
+        `).join('');
+      }} catch (e) {{ console.error(e); }}
+    }}
+
+    async function banIpDirect(ip) {{
+      if (!confirm('确定要封禁 ' + ip + ' 吗？')) return;
+      const fd = new FormData();
+      fd.append('ip', ip);
+      fd.append('reason', 'Manual ban from admin');
+      await fetch('/admin/api/ban-ip', {{ method: 'POST', body: fd }});
+      refreshIpStats();
+      refreshBlacklist();
+      refreshStats();
+    }}
+
+    async function banIp() {{
+      const ip = document.getElementById('banIpInput').value.trim();
+      if (!ip) return alert('请输入 IP 地址');
+      const fd = new FormData();
+      fd.append('ip', ip);
+      fd.append('reason', 'Manual ban from admin');
+      await fetch('/admin/api/ban-ip', {{ method: 'POST', body: fd }});
+      document.getElementById('banIpInput').value = '';
+      refreshBlacklist();
+      refreshStats();
+    }}
+
+    async function unbanIp(ip) {{
+      if (!confirm('确定要解封 ' + ip + ' 吗？')) return;
+      const fd = new FormData();
+      fd.append('ip', ip);
+      await fetch('/admin/api/unban-ip', {{ method: 'POST', body: fd }});
+      refreshBlacklist();
+      refreshStats();
+    }}
+
+    async function toggleSite(enabled) {{
+      const fd = new FormData();
+      fd.append('enabled', enabled);
+      await fetch('/admin/api/toggle-site', {{ method: 'POST', body: fd }});
+      refreshStats();
+    }}
+
+    async function refreshToken() {{
+      const r = await fetch('/admin/api/refresh-token', {{ method: 'POST' }});
+      const d = await r.json();
+      alert(d.message || (d.success ? '刷新成功' : '刷新失败'));
+      refreshStats();
+    }}
+
+    async function clearCache() {{
+      const r = await fetch('/admin/api/clear-cache', {{ method: 'POST' }});
+      const d = await r.json();
+      alert(d.message || (d.success ? '清除成功' : '清除失败'));
+    }}
+
+    async function refreshTokenList() {{
+      try {{
+        const r = await fetch('/admin/api/tokens');
+        const d = await r.json();
+        const tb = document.getElementById('tokenListTable');
+        if (!d.tokens || !d.tokens.length) {{
+          tb.innerHTML = '<tr><td colspan="4" class="py-6 text-center" style="color: var(--text-muted);">暂无缓存的用户 Token</td></tr>';
+          return;
+        }}
+        tb.innerHTML = d.tokens.map((t, i) => `
+          <tr class="table-row">
+            <td class="py-3 px-3">${{i + 1}}</td>
+            <td class="py-3 px-3 font-mono">${{t.masked_token}}</td>
+            <td class="py-3 px-3">${{t.has_access_token ? '<span class="text-green-400">已认证</span>' : '<span class="text-yellow-400">待认证</span>'}}</td>
+            <td class="py-3 px-3">
+              <button onclick="removeToken('${{t.token_id}}')" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30">移除</button>
+            </td>
+          </tr>
+        `).join('');
+      }} catch (e) {{ console.error(e); }}
+    }}
+
+    async function removeToken(tokenId) {{
+      if (!confirm('确定要移除此 Token 吗？用户需要重新认证。')) return;
+      const fd = new FormData();
+      fd.append('token_id', tokenId);
+      await fetch('/admin/api/remove-token', {{ method: 'POST', body: fd }});
+      refreshTokenList();
+      refreshStats();
+    }}
+
+    async function clearAllTokens() {{
+      if (!confirm('确定要清空所有缓存的 Token 吗？所有用户需要重新认证。')) return;
+      await fetch('/admin/api/clear-tokens', {{ method: 'POST' }});
+      refreshTokenList();
+      refreshStats();
+      alert('已清空所有缓存的 Token');
+    }}
+
+    async function refreshUsers() {{
+      try {{
+        const r = await fetch('/admin/api/users');
+        const d = await r.json();
+        const tb = document.getElementById('usersTable');
+        if (!d.users || !d.users.length) {{
+          tb.innerHTML = '<tr><td colspan="8" class="py-6 text-center" style="color: var(--text-muted);">暂无用户</td></tr>';
+          return;
+        }}
+        tb.innerHTML = d.users.map(u => `
+          <tr class="table-row">
+            <td class="py-3 px-3">${{u.id}}</td>
+            <td class="py-3 px-3 font-medium">${{u.username}}</td>
+            <td class="py-3 px-3">Lv.${{u.trust_level}}</td>
+            <td class="py-3 px-3">${{u.token_count}}</td>
+            <td class="py-3 px-3">${{u.api_key_count}}</td>
+            <td class="py-3 px-3">${{u.is_banned ? '<span class="text-red-400">已封禁</span>' : '<span class="text-green-400">正常</span>'}}</td>
+            <td class="py-3 px-3">${{u.created_at ? new Date(u.created_at).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3">
+              ${{u.is_banned
+                ? `<button onclick="unbanUser(${{u.id}})" class="text-xs px-2 py-1 rounded bg-green-500/20 text-green-400 hover:bg-green-500/30">解封</button>`
+                : `<button onclick="banUser(${{u.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30">封禁</button>`
+              }}
+            </td>
+          </tr>
+        `).join('');
+      }} catch (e) {{ console.error(e); }}
+    }}
+
+    async function banUser(userId) {{
+      if (!confirm('确定要封禁此用户吗？')) return;
+      const fd = new FormData();
+      fd.append('user_id', userId);
+      await fetch('/admin/api/users/ban', {{ method: 'POST', body: fd }});
+      refreshUsers();
+    }}
+
+    async function unbanUser(userId) {{
+      if (!confirm('确定要解封此用户吗？')) return;
+      const fd = new FormData();
+      fd.append('user_id', userId);
+      await fetch('/admin/api/users/unban', {{ method: 'POST', body: fd }});
+      refreshUsers();
+    }}
+
+    async function refreshDonatedTokens() {{
+      try {{
+        const r = await fetch('/admin/api/donated-tokens');
+        const d = await r.json();
+        document.getElementById('poolTotalTokens').textContent = d.total || 0;
+        document.getElementById('poolActiveTokens').textContent = d.active || 0;
+        document.getElementById('poolPublicTokens').textContent = d.public || 0;
+        document.getElementById('poolAvgSuccessRate').textContent = d.avg_success_rate ? d.avg_success_rate.toFixed(1) + '%' : '-';
+        const tb = document.getElementById('donatedTokensTable');
+        if (!d.tokens || !d.tokens.length) {{
+          tb.innerHTML = '<tr><td colspan="8" class="py-6 text-center" style="color: var(--text-muted);">暂无捐献 Token</td></tr>';
+          return;
+        }}
+        tb.innerHTML = d.tokens.map(t => `
+          <tr class="table-row">
+            <td class="py-3 px-3">#${{t.id}}</td>
+            <td class="py-3 px-3">${{t.username || 'Unknown'}}</td>
+            <td class="py-3 px-3">${{t.visibility === 'public' ? '<span class="text-green-400">公开</span>' : '<span class="text-blue-400">私有</span>'}}</td>
+            <td class="py-3 px-3">${{t.status === 'active' ? '<span class="text-green-400">有效</span>' : '<span class="text-red-400">' + t.status + '</span>'}}</td>
+            <td class="py-3 px-3">${{(t.success_rate * 100).toFixed(1)}}%</td>
+            <td class="py-3 px-3">${{t.success_count + t.fail_count}}</td>
+            <td class="py-3 px-3">${{t.last_used ? new Date(t.last_used).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3">
+              <button onclick="toggleTokenVisibility(${{t.id}}, '${{t.visibility === 'public' ? 'private' : 'public'}}')" class="text-xs px-2 py-1 rounded bg-indigo-500/20 text-indigo-400 hover:bg-indigo-500/30 mr-1">切换</button>
+              <button onclick="deleteDonatedToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30">删除</button>
+            </td>
+          </tr>
+        `).join('');
+      }} catch (e) {{ console.error(e); }}
+    }}
+
+    async function toggleTokenVisibility(tokenId, newVisibility) {{
+      const fd = new FormData();
+      fd.append('token_id', tokenId);
+      fd.append('visibility', newVisibility);
+      await fetch('/admin/api/donated-tokens/visibility', {{ method: 'POST', body: fd }});
+      refreshDonatedTokens();
+    }}
+
+    async function deleteDonatedToken(tokenId) {{
+      if (!confirm('确定要删除此 Token 吗？')) return;
+      const fd = new FormData();
+      fd.append('token_id', tokenId);
+      await fetch('/admin/api/donated-tokens/delete', {{ method: 'POST', body: fd }});
+      refreshDonatedTokens();
+    }}
+
+    refreshStats();
+    setInterval(refreshStats, 10000);
+  </script>
+</body>
+</html>'''
+
+
+def render_user_page(user) -> str:
+    """Render the user dashboard page."""
+    return f'''<!DOCTYPE html>
+<html lang="zh">
+<head>{COMMON_HEAD}</head>
+<body>
+  {COMMON_NAV}
+  <main class="max-w-6xl mx-auto px-4 py-8">
+    <div class="card mb-6">
+      <div class="flex items-center gap-4">
+        <div class="w-16 h-16 rounded-full bg-indigo-500/20 flex items-center justify-center text-2xl">
+          {user.username[0].upper() if user.username else '👤'}
+        </div>
+        <div>
+          <h1 class="text-2xl font-bold">{user.username}</h1>
+          <p style="color: var(--text-muted);">信任等级: Lv.{user.trust_level}</p>
+        </div>
+        <div class="ml-auto">
+          <a href="/oauth2/logout" class="btn-primary">退出登录</a>
+        </div>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="card text-center">
+        <div class="text-3xl font-bold text-indigo-400" id="tokenCount">-</div>
+        <div class="text-sm" style="color: var(--text-muted);">我的 Token</div>
+      </div>
+      <div class="card text-center">
+        <div class="text-3xl font-bold text-green-400" id="publicTokenCount">-</div>
+        <div class="text-sm" style="color: var(--text-muted);">公开 Token</div>
+      </div>
+      <div class="card text-center">
+        <div class="text-3xl font-bold text-amber-400" id="apiKeyCount">-</div>
+        <div class="text-sm" style="color: var(--text-muted);">API Keys</div>
+      </div>
+      <div class="card text-center">
+        <div class="text-3xl font-bold text-purple-400" id="requestCount">-</div>
+        <div class="text-sm" style="color: var(--text-muted);">总请求</div>
+      </div>
+    </div>
+    <div class="flex gap-2 mb-4 border-b" style="border-color: var(--border);">
+      <button class="tab px-4 py-2 font-medium" onclick="showTab('tokens')" id="tab-tokens">🔑 Token 管理</button>
+      <button class="tab px-4 py-2 font-medium" onclick="showTab('keys')" id="tab-keys">🗝️ API Keys</button>
+    </div>
+    <div id="panel-tokens" class="tab-panel">
+      <div class="card">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-bold">我的 Token</h2>
+          <button onclick="showDonateModal()" class="btn-primary">+ 捐献 Token</button>
+        </div>
+        <div class="table-responsive">
+          <table class="w-full">
+            <thead>
+              <tr style="border-bottom: 1px solid var(--border);">
+                <th class="text-left py-3 px-3">ID</th>
+                <th class="text-left py-3 px-3">可见性</th>
+                <th class="text-left py-3 px-3">状态</th>
+                <th class="text-left py-3 px-3">成功率</th>
+                <th class="text-left py-3 px-3">最后使用</th>
+                <th class="text-left py-3 px-3">操作</th>
+              </tr>
+            </thead>
+            <tbody id="tokenTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div id="panel-keys" class="tab-panel" style="display: none;">
+      <div class="card">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-bold">我的 API Keys</h2>
+          <button onclick="generateKey()" class="btn-primary">+ 生成新 Key</button>
+        </div>
+        <div class="table-responsive">
+          <table class="w-full">
+            <thead>
+              <tr style="border-bottom: 1px solid var(--border);">
+                <th class="text-left py-3 px-3">Key</th>
+                <th class="text-left py-3 px-3">名称</th>
+                <th class="text-left py-3 px-3">请求数</th>
+                <th class="text-left py-3 px-3">最后使用</th>
+                <th class="text-left py-3 px-3">操作</th>
+              </tr>
+            </thead>
+            <tbody id="keyTable"></tbody>
+          </table>
+        </div>
+        <p class="mt-4 text-sm" style="color: var(--text-muted);">
+          💡 API Key 仅在创建时显示一次，请妥善保存。使用方式: <code class="bg-black/20 px-1 rounded">Authorization: Bearer sk-xxx</code>
+        </p>
+      </div>
+    </div>
+  </main>
+  <div id="donateModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
+    <div class="card w-full max-w-md mx-4">
+      <h3 class="text-lg font-bold mb-4">捐献 Refresh Token</h3>
+      <textarea id="donateToken" class="w-full h-32 p-3 rounded-lg" style="background: var(--bg-input); border: 1px solid var(--border);" placeholder="粘贴你的 Refresh Token..."></textarea>
+      <div class="flex items-center gap-4 mt-4">
+        <label class="flex items-center gap-2"><input type="radio" name="visibility" value="private" checked> 私有</label>
+        <label class="flex items-center gap-2"><input type="radio" name="visibility" value="public"> 公开</label>
+      </div>
+      <p class="text-sm mt-2" style="color: var(--text-muted);">公开的 Token 会加入公共池供所有用户使用</p>
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="hideDonateModal()" class="px-4 py-2 rounded-lg" style="background: var(--bg-input);">取消</button>
+        <button onclick="donateToken()" class="btn-primary">提交</button>
+      </div>
+    </div>
+  </div>
+  {COMMON_FOOTER}
+  <style>
+    .tab {{ color: var(--text-muted); border-bottom: 2px solid transparent; }}
+    .tab.active {{ color: var(--primary); border-bottom-color: var(--primary); }}
+    .table-row:hover {{ background: var(--bg-input); }}
+  </style>
+  <script>
+    let currentTab = 'tokens';
+    function showTab(tab) {{
+      currentTab = tab;
+      document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.getElementById('panel-' + tab).style.display = 'block';
+      document.getElementById('tab-' + tab).classList.add('active');
+    }}
+    async function loadProfile() {{
+      try {{
+        const r = await fetch('/user/api/profile');
+        const d = await r.json();
+        document.getElementById('tokenCount').textContent = d.token_count || 0;
+        document.getElementById('publicTokenCount').textContent = d.public_token_count || 0;
+        document.getElementById('apiKeyCount').textContent = d.api_key_count || 0;
+        document.getElementById('requestCount').textContent = '-';
+      }} catch (e) {{ console.error(e); }}
+    }}
+    async function loadTokens() {{
+      try {{
+        const r = await fetch('/user/api/tokens');
+        const d = await r.json();
+        const tb = document.getElementById('tokenTable');
+        if (!d.tokens || !d.tokens.length) {{
+          tb.innerHTML = '<tr><td colspan="6" class="py-6 text-center" style="color: var(--text-muted);">暂无 Token，点击上方按钮捐献</td></tr>';
+          return;
+        }}
+        tb.innerHTML = d.tokens.map(t => `
+          <tr class="table-row">
+            <td class="py-3 px-3">#${{t.id}}</td>
+            <td class="py-3 px-3"><span class="${{t.visibility === 'public' ? 'text-green-400' : 'text-blue-400'}}">${{t.visibility === 'public' ? '公开' : '私有'}}</span></td>
+            <td class="py-3 px-3"><span class="${{t.status === 'active' ? 'text-green-400' : 'text-red-400'}}">${{t.status === 'active' ? '有效' : t.status}}</span></td>
+            <td class="py-3 px-3">${{t.success_rate}}%</td>
+            <td class="py-3 px-3">${{t.last_used ? new Date(t.last_used).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3">
+              <button onclick="toggleVisibility(${{t.id}}, '${{t.visibility === 'public' ? 'private' : 'public'}}')" class="text-xs px-2 py-1 rounded bg-indigo-500/20 text-indigo-400 mr-1">切换</button>
+              <button onclick="deleteToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
+            </td>
+          </tr>
+        `).join('');
+      }} catch (e) {{ console.error(e); }}
+    }}
+    async function loadKeys() {{
+      try {{
+        const r = await fetch('/user/api/keys');
+        const d = await r.json();
+        const tb = document.getElementById('keyTable');
+        if (!d.keys || !d.keys.length) {{
+          tb.innerHTML = '<tr><td colspan="5" class="py-6 text-center" style="color: var(--text-muted);">暂无 API Key，点击上方按钮生成</td></tr>';
+          return;
+        }}
+        tb.innerHTML = d.keys.map(k => `
+          <tr class="table-row">
+            <td class="py-3 px-3 font-mono">${{k.key_prefix}}</td>
+            <td class="py-3 px-3">${{k.name || '-'}}</td>
+            <td class="py-3 px-3">${{k.request_count}}</td>
+            <td class="py-3 px-3">${{k.last_used ? new Date(k.last_used).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3"><button onclick="deleteKey(${{k.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button></td>
+          </tr>
+        `).join('');
+      }} catch (e) {{ console.error(e); }}
+    }}
+    function showDonateModal() {{ document.getElementById('donateModal').style.display = 'flex'; }}
+    function hideDonateModal() {{ document.getElementById('donateModal').style.display = 'none'; }}
+    async function donateToken() {{
+      const token = document.getElementById('donateToken').value.trim();
+      if (!token) return alert('请输入 Token');
+      const visibility = document.querySelector('input[name="visibility"]:checked').value;
+      const fd = new FormData();
+      fd.append('refresh_token', token);
+      fd.append('visibility', visibility);
+      try {{
+        const r = await fetch('/user/api/tokens', {{ method: 'POST', body: fd }});
+        const d = await r.json();
+        if (d.success) {{
+          alert('Token 捐献成功！');
+          hideDonateModal();
+          document.getElementById('donateToken').value = '';
+          loadTokens();
+          loadProfile();
+        }} else {{ alert(d.message || '捐献失败'); }}
+      }} catch (e) {{ alert('请求失败'); }}
+    }}
+    async function toggleVisibility(tokenId, newVisibility) {{
+      const fd = new FormData();
+      fd.append('visibility', newVisibility);
+      await fetch('/user/api/tokens/' + tokenId, {{ method: 'PUT', body: fd }});
+      loadTokens();
+      loadProfile();
+    }}
+    async function deleteToken(tokenId) {{
+      if (!confirm('确定要删除此 Token 吗？')) return;
+      await fetch('/user/api/tokens/' + tokenId, {{ method: 'DELETE' }});
+      loadTokens();
+      loadProfile();
+    }}
+    async function generateKey() {{
+      const name = prompt('Key 名称（可选）');
+      const fd = new FormData();
+      fd.append('name', name || '');
+      try {{
+        const r = await fetch('/user/api/keys', {{ method: 'POST', body: fd }});
+        const d = await r.json();
+        if (d.success) {{
+          alert('API Key 已生成！\\n\\n请立即复制保存，此 Key 仅显示一次：\\n\\n' + d.key);
+          loadKeys();
+          loadProfile();
+        }} else {{ alert(d.message || '生成失败'); }}
+      }} catch (e) {{ alert('请求失败'); }}
+    }}
+    async function deleteKey(keyId) {{
+      if (!confirm('确定要删除此 API Key 吗？')) return;
+      await fetch('/user/api/keys/' + keyId, {{ method: 'DELETE' }});
+      loadKeys();
+      loadProfile();
+    }}
+    showTab('tokens');
+    loadProfile();
+    loadTokens();
+    loadKeys();
+  </script>
+</body>
+</html>'''
+
+
+def render_tokens_page(user=None) -> str:
+    """Render the public token pool page."""
+    login_section = '<a href="/user" class="btn-primary">用户中心</a>' if user else '<a href="/login" class="btn-primary">登录捐献</a>'
+    return f'''<!DOCTYPE html>
+<html lang="zh">
+<head>{COMMON_HEAD}</head>
+<body>
+  {COMMON_NAV}
+  <main class="max-w-4xl mx-auto px-4 py-8">
+    <div class="text-center mb-8">
+      <h1 class="text-3xl font-bold mb-2">🌐 公开 Token 池</h1>
+      <p style="color: var(--text-muted);">社区捐献的 Refresh Token，供所有用户共享使用</p>
+    </div>
+    <div class="grid grid-cols-2 gap-4 mb-8">
+      <div class="card text-center">
+        <div class="text-4xl font-bold text-green-400" id="poolCount">-</div>
+        <div style="color: var(--text-muted);">可用 Token</div>
+      </div>
+      <div class="card text-center">
+        <div class="text-4xl font-bold text-indigo-400" id="avgRate">-</div>
+        <div style="color: var(--text-muted);">平均成功率</div>
+      </div>
+    </div>
+    <div class="card mb-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold">Token 列表</h2>
+        {login_section}
+      </div>
+      <div class="table-responsive">
+        <table class="w-full">
+          <thead>
+            <tr style="border-bottom: 1px solid var(--border);">
+              <th class="text-left py-3 px-3">#</th>
+              <th class="text-left py-3 px-3">成功率</th>
+              <th class="text-left py-3 px-3">最后使用</th>
+            </tr>
+          </thead>
+          <tbody id="poolTable"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card">
+      <h3 class="font-bold mb-3">💡 如何使用</h3>
+      <ol class="list-decimal list-inside space-y-2" style="color: var(--text-muted);">
+        <li>通过 LinuxDo 或 GitHub 登录本站</li>
+        <li>在用户中心捐献你的 Refresh Token</li>
+        <li>选择"公开"以加入公共池</li>
+        <li>生成 API Key (sk-xxx 格式)</li>
+        <li>使用 API Key 调用本站接口</li>
+      </ol>
+    </div>
+  </main>
+  {COMMON_FOOTER}
+  <script>
+    async function loadPool() {{
+      try {{
+        const r = await fetch('/api/public-tokens');
+        const d = await r.json();
+        document.getElementById('poolCount').textContent = d.count || 0;
+        const tokens = d.tokens || [];
+        if (tokens.length > 0) {{
+          const avgRate = tokens.reduce((sum, t) => sum + t.success_rate, 0) / tokens.length;
+          document.getElementById('avgRate').textContent = avgRate.toFixed(1) + '%';
+        }} else {{ document.getElementById('avgRate').textContent = '-'; }}
+        const tb = document.getElementById('poolTable');
+        if (!tokens.length) {{
+          tb.innerHTML = '<tr><td colspan="3" class="py-6 text-center" style="color: var(--text-muted);">暂无公开 Token</td></tr>';
+          return;
+        }}
+        tb.innerHTML = tokens.map((t, i) => `
+          <tr style="border-bottom: 1px solid var(--border);">
+            <td class="py-3 px-3">${{i + 1}}</td>
+            <td class="py-3 px-3"><span class="${{t.success_rate >= 80 ? 'text-green-400' : t.success_rate >= 50 ? 'text-yellow-400' : 'text-red-400'}}">${{t.success_rate}}%</span></td>
+            <td class="py-3 px-3" style="color: var(--text-muted);">${{t.last_used ? new Date(t.last_used).toLocaleString() : '-'}}</td>
+          </tr>
+        `).join('');
+      }} catch (e) {{ console.error(e); }}
+    }}
+    loadPool();
+    setInterval(loadPool, 30000);
+  </script>
+</body>
+</html>'''
+
+
+def render_login_page() -> str:
+    """Render the login selection page with multiple OAuth2 providers."""
+    return f'''<!DOCTYPE html>
+<html lang="zh">
+<head>{COMMON_HEAD}</head>
+<body>
+  {COMMON_NAV}
+  <main class="max-w-md mx-auto px-4 py-16">
+    <div class="card text-center">
+      <div class="mb-6">
+        <h1 class="text-2xl font-bold mb-2">🔐 用户登录</h1>
+        <p style="color: var(--text-muted);">选择一种登录方式开始使用</p>
+      </div>
+      <div class="space-y-4">
+        <a href="/oauth2/login" class="btn-primary w-full flex items-center justify-center gap-3" style="display: flex; padding: 12px 24px;">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+          LinuxDo 登录
+        </a>
+        <a href="/oauth2/github/login" class="w-full flex items-center justify-center gap-3" style="display: flex; padding: 12px 24px; background: #24292e; color: white; border-radius: 8px; font-weight: 500; transition: all 0.2s;">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub 登录
+        </a>
+      </div>
+      <div class="mt-6 pt-6" style="border-top: 1px solid var(--border);">
+        <p style="color: var(--text-muted); font-size: 0.875rem;">
+          登录后可捐献 Token 并生成 API Key
+        </p>
+      </div>
+    </div>
+  </main>
+  {COMMON_FOOTER}
+</body>
+</html>'''
+
+
+def render_404_page() -> str:
+    """Render the 404 Not Found page."""
+    return f'''<!DOCTYPE html>
+<html lang="zh">
+<head>{COMMON_HEAD}</head>
+<body>
+  {COMMON_NAV}
+  <main class="max-w-2xl mx-auto px-4 py-16 text-center">
+    <div class="mb-8">
+      <div class="text-9xl font-bold" style="background: linear-gradient(135deg, var(--primary) 0%, #ec4899 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">404</div>
+    </div>
+    <h1 class="text-3xl font-bold mb-4">页面未找到</h1>
+    <p class="text-lg mb-8" style="color: var(--text-muted);">
+      抱歉，您访问的页面不存在或已被移动。
+    </p>
+    <div class="flex flex-col sm:flex-row gap-4 justify-center">
+      <a href="/" class="btn-primary inline-flex items-center gap-2">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+        </svg>
+        返回首页
+      </a>
+      <a href="/docs" class="inline-flex items-center gap-2 px-6 py-3 rounded-lg font-medium transition-all" style="background: var(--bg-card); border: 1px solid var(--border);">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
+        </svg>
+        查看文档
+      </a>
+    </div>
+    <div class="mt-12 p-6 rounded-lg" style="background: var(--bg-card); border: 1px solid var(--border);">
+      <h3 class="font-bold mb-3">💡 可能有帮助的链接</h3>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+        <a href="/playground" class="p-3 rounded-lg hover:bg-opacity-80 transition-all" style="background: var(--bg);">🎮 Playground</a>
+        <a href="/status" class="p-3 rounded-lg hover:bg-opacity-80 transition-all" style="background: var(--bg);">📊 系统状态</a>
+        <a href="/swagger" class="p-3 rounded-lg hover:bg-opacity-80 transition-all" style="background: var(--bg);">📚 API 文档</a>
+        <a href="/tokens" class="p-3 rounded-lg hover:bg-opacity-80 transition-all" style="background: var(--bg);">🌐 Token 池</a>
+      </div>
+    </div>
+  </main>
+  {COMMON_FOOTER}
 </body>
 </html>'''

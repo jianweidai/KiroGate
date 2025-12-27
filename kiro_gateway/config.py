@@ -208,6 +208,64 @@ class Settings(BaseSettings):
     # 分片重叠字符数
     chunk_overlap_chars: int = Field(default=2000, alias="CHUNK_OVERLAP_CHARS")
 
+    # ==================================================================================================
+    # Admin 管理页面配置
+    # ==================================================================================================
+
+    # Admin 登录密码
+    admin_password: str = Field(default="admin123", alias="ADMIN_PASSWORD")
+
+    # Admin Session 签名密钥（请在生产环境中更改）
+    admin_secret_key: str = Field(default="kirogate_admin_secret_key_change_me", alias="ADMIN_SECRET_KEY")
+
+    # Admin Session 有效期（秒）
+    admin_session_max_age: int = Field(default=86400, alias="ADMIN_SESSION_MAX_AGE")
+
+    # ==================================================================================================
+    # OAuth2 LinuxDo 配置
+    # ==================================================================================================
+
+    # OAuth2 Client ID
+    oauth_client_id: str = Field(default="", alias="OAUTH_CLIENT_ID")
+
+    # OAuth2 Client Secret
+    oauth_client_secret: str = Field(default="", alias="OAUTH_CLIENT_SECRET")
+
+    # OAuth2 Redirect URI
+    oauth_redirect_uri: str = Field(default="http://localhost:8000/oauth2/callback", alias="OAUTH_REDIRECT_URI")
+
+    # ==================================================================================================
+    # OAuth2 GitHub 配置
+    # ==================================================================================================
+
+    # GitHub OAuth2 Client ID
+    github_client_id: str = Field(default="", alias="GITHUB_CLIENT_ID")
+
+    # GitHub OAuth2 Client Secret
+    github_client_secret: str = Field(default="", alias="GITHUB_CLIENT_SECRET")
+
+    # GitHub OAuth2 Redirect URI
+    github_redirect_uri: str = Field(default="http://localhost:8000/oauth2/github/callback", alias="GITHUB_REDIRECT_URI")
+
+    # ==================================================================================================
+    # 用户系统配置
+    # ==================================================================================================
+
+    # 用户 Session 签名密钥
+    user_session_secret: str = Field(default="kirogate_user_secret_change_me", alias="USER_SESSION_SECRET")
+
+    # 用户 Session 有效期（秒），默认7天
+    user_session_max_age: int = Field(default=604800, alias="USER_SESSION_MAX_AGE")
+
+    # Token 加密密钥（32字节）
+    token_encrypt_key: str = Field(default="kirogate_token_encrypt_key_32b!", alias="TOKEN_ENCRYPT_KEY")
+
+    # Token 健康检查间隔（秒）
+    token_health_check_interval: int = Field(default=3600, alias="TOKEN_HEALTH_CHECK_INTERVAL")
+
+    # Token 最低成功率阈值
+    token_min_success_rate: float = Field(default=0.7, alias="TOKEN_MIN_SUCCESS_RATE")
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:
@@ -266,6 +324,34 @@ AUTO_CHUNKING_ENABLED: bool = settings.auto_chunking_enabled
 AUTO_CHUNK_THRESHOLD: int = settings.auto_chunk_threshold
 CHUNK_MAX_CHARS: int = settings.chunk_max_chars
 CHUNK_OVERLAP_CHARS: int = settings.chunk_overlap_chars
+ADMIN_PASSWORD: str = settings.admin_password
+ADMIN_SECRET_KEY: str = settings.admin_secret_key
+ADMIN_SESSION_MAX_AGE: int = settings.admin_session_max_age
+
+# OAuth2 & User System
+OAUTH_CLIENT_ID: str = settings.oauth_client_id
+OAUTH_CLIENT_SECRET: str = settings.oauth_client_secret
+OAUTH_REDIRECT_URI: str = settings.oauth_redirect_uri
+USER_SESSION_SECRET: str = settings.user_session_secret
+USER_SESSION_MAX_AGE: int = settings.user_session_max_age
+TOKEN_ENCRYPT_KEY: str = settings.token_encrypt_key
+TOKEN_HEALTH_CHECK_INTERVAL: int = settings.token_health_check_interval
+TOKEN_MIN_SUCCESS_RATE: float = settings.token_min_success_rate
+
+# OAuth2 LinuxDo endpoints
+OAUTH_AUTHORIZATION_URL: str = "https://connect.linux.do/oauth2/authorize"
+OAUTH_TOKEN_URL: str = "https://connect.linux.do/oauth2/token"
+OAUTH_USER_URL: str = "https://connect.linux.do/api/user"
+
+# OAuth2 GitHub configuration
+GITHUB_CLIENT_ID: str = settings.github_client_id
+GITHUB_CLIENT_SECRET: str = settings.github_client_secret
+GITHUB_REDIRECT_URI: str = settings.github_redirect_uri
+
+# OAuth2 GitHub endpoints
+GITHUB_AUTHORIZATION_URL: str = "https://github.com/login/oauth/authorize"
+GITHUB_TOKEN_URL: str = "https://github.com/login/oauth/access_token"
+GITHUB_USER_URL: str = "https://api.github.com/user"
 
 # ==================================================================================================
 # Slow Model Configuration

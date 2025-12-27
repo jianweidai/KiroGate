@@ -34,7 +34,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from loguru import logger
 from slowapi import _rate_limit_exceeded_handler
@@ -50,7 +50,7 @@ from kiro_gateway.auth import KiroAuthManager
 from kiro_gateway.cache import ModelInfoCache
 from kiro_gateway.routes import router, limiter, rate_limit_handler
 from kiro_gateway.exceptions import validation_exception_handler
-from kiro_gateway.middleware import RequestTrackingMiddleware, metrics_middleware
+from kiro_gateway.middleware import RequestTrackingMiddleware, MetricsMiddleware, SiteGuardMiddleware
 from kiro_gateway.http_client import close_global_http_client
 
 
@@ -237,9 +237,16 @@ async def lifespan(app: FastAPI):
 
     logger.info("Application startup complete.")
 
+    # Start token health checker (for user token pool)
+    from kiro_gateway.health_checker import health_checker
+    await health_checker.start()
+
     yield
 
     logger.info("Shutting down application...")
+
+    # Stop health checker
+    await health_checker.stop()
 
     # 停止后台任务
     if has_global_credentials:
@@ -261,9 +268,10 @@ app = FastAPI(
     redoc_url=None  # 禁用默认的 /redoc
 )
 
-# 添加中间件（顺序很重要）
+# 添加中间件（顺序很重要：最后添加的最先执行）
 app.add_middleware(RequestTrackingMiddleware)
-app.add_middleware(metrics_middleware)
+app.add_middleware(MetricsMiddleware)
+app.add_middleware(SiteGuardMiddleware)
 
 # 设置速率限制器
 app.state.limiter = limiter
@@ -271,6 +279,16 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
 # 注册验证错误处理器
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
+
+
+# 404 页面处理器
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc):
+    """Handle 404 errors with a custom page."""
+    from fastapi.responses import HTMLResponse
+    from kiro_gateway.pages import render_404_page
+    return HTMLResponse(content=render_404_page(), status_code=404)
+
 
 # 包含路由
 app.include_router(router)

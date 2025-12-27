@@ -23,15 +23,19 @@ Prometheus metrics module.
 Provides structured application metrics collection and export.
 """
 
+import os
+import sqlite3
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional
-from dataclasses import dataclass, field
+from typing import Dict, List
+from dataclasses import dataclass
 from threading import Lock
 
 from loguru import logger
 
 from kiro_gateway.config import APP_VERSION
+
+METRICS_DB_FILE = os.getenv("METRICS_DB_FILE", "data/metrics.db")
 
 
 @dataclass
@@ -62,6 +66,8 @@ class PrometheusMetrics:
     def __init__(self):
         """Initialize metrics collector."""
         self._lock = Lock()
+        self._db_path = METRICS_DB_FILE
+        self._init_db()
 
         # Counters
         self._request_total: Dict[str, int] = defaultdict(int)  # {endpoint:status:model: count}
@@ -93,6 +99,164 @@ class PrometheusMetrics:
         self._response_times: List[float] = []
         self._recent_requests: List[Dict] = []
         self._api_type_usage: Dict[str, int] = defaultdict(int)  # {openai/anthropic: count}
+        self._hourly_requests: Dict[int, int] = defaultdict(int)  # {hour_timestamp: count}
+
+        # IP statistics and blacklist
+        self._ip_requests: Dict[str, int] = defaultdict(int)  # {ip: count}
+        self._ip_last_seen: Dict[str, int] = {}  # {ip: timestamp_ms}
+        self._ip_blacklist: Dict[str, Dict] = {}  # {ip: {banned_at, reason}}
+        self._site_enabled: bool = True  # Site on/off switch
+
+        # Load persisted data
+        self._load_from_db()
+
+    def _init_db(self) -> None:
+        """Initialize SQLite database and create tables."""
+        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
+        with sqlite3.connect(self._db_path) as conn:
+            conn.executescript('''
+                CREATE TABLE IF NOT EXISTS counters (
+                    key TEXT PRIMARY KEY,
+                    value INTEGER DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS hourly_requests (
+                    hour_ts INTEGER PRIMARY KEY,
+                    count INTEGER DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS recent_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp INTEGER,
+                    api_type TEXT,
+                    path TEXT,
+                    status INTEGER,
+                    duration REAL,
+                    model TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_recent_ts ON recent_requests(timestamp);
+                CREATE TABLE IF NOT EXISTS ip_stats (
+                    ip TEXT PRIMARY KEY,
+                    count INTEGER DEFAULT 0,
+                    last_seen INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS ip_blacklist (
+                    ip TEXT PRIMARY KEY,
+                    banned_at INTEGER,
+                    reason TEXT
+                );
+                CREATE TABLE IF NOT EXISTS site_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+            ''')
+            conn.commit()
+
+    def _load_from_db(self) -> None:
+        """Load metrics from SQLite database."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                # Load counters
+                cursor = conn.execute("SELECT key, value FROM counters")
+                for key, value in cursor:
+                    if key.startswith("req:"):
+                        self._request_total[key[4:]] = value
+                    elif key.startswith("err:"):
+                        self._error_total[key[4:]] = value
+                    elif key.startswith("retry:"):
+                        self._retry_total[key[6:]] = value
+                    elif key.startswith("api:"):
+                        self._api_type_usage[key[4:]] = value
+                    elif key.startswith("in_tok:"):
+                        self._input_tokens_total[key[7:]] = value
+                    elif key.startswith("out_tok:"):
+                        self._output_tokens_total[key[8:]] = value
+                    elif key == "stream_requests":
+                        self._stream_requests = value
+                    elif key == "non_stream_requests":
+                        self._non_stream_requests = value
+
+                # Load hourly requests
+                cursor = conn.execute("SELECT hour_ts, count FROM hourly_requests")
+                for hour_ts, count in cursor:
+                    self._hourly_requests[hour_ts] = count
+
+                # Load recent requests (last 50)
+                cursor = conn.execute(
+                    "SELECT timestamp, api_type, path, status, duration, model "
+                    "FROM recent_requests ORDER BY id DESC LIMIT 50"
+                )
+                rows = cursor.fetchall()
+                self._recent_requests = [
+                    {"timestamp": r[0], "apiType": r[1], "path": r[2],
+                     "status": r[3], "duration": r[4], "model": r[5]}
+                    for r in reversed(rows)
+                ]
+
+                # Load IP stats
+                cursor = conn.execute("SELECT ip, count, last_seen FROM ip_stats")
+                for ip, count, last_seen in cursor:
+                    self._ip_requests[ip] = count
+                    self._ip_last_seen[ip] = last_seen
+
+                # Load IP blacklist
+                cursor = conn.execute("SELECT ip, banned_at, reason FROM ip_blacklist")
+                for ip, banned_at, reason in cursor:
+                    self._ip_blacklist[ip] = {"banned_at": banned_at, "reason": reason}
+
+                # Load site config
+                cursor = conn.execute("SELECT key, value FROM site_config WHERE key = 'site_enabled'")
+                row = cursor.fetchone()
+                if row:
+                    self._site_enabled = row[1] == "true"
+
+                logger.info(f"Loaded metrics from {self._db_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load metrics from DB: {e}")
+
+    def _save_counter(self, key: str, value: int) -> None:
+        """Save a single counter to database."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO counters (key, value) VALUES (?, ?)",
+                    (key, value)
+                )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Failed to save counter: {e}")
+
+    def _save_hourly(self, hour_ts: int, count: int) -> None:
+        """Save hourly request count."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO hourly_requests (hour_ts, count) VALUES (?, ?)",
+                    (hour_ts, count)
+                )
+                # Clean old data (> 24h)
+                cutoff = hour_ts - 24 * 3600000
+                conn.execute("DELETE FROM hourly_requests WHERE hour_ts < ?", (cutoff,))
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Failed to save hourly: {e}")
+
+    def _save_recent_request(self, req: Dict) -> None:
+        """Save a recent request to database."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                conn.execute(
+                    "INSERT INTO recent_requests (timestamp, api_type, path, status, duration, model) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (req["timestamp"], req["apiType"], req["path"],
+                     req["status"], req["duration"], req["model"])
+                )
+                # Keep only last 100 records
+                conn.execute(
+                    "DELETE FROM recent_requests WHERE id NOT IN "
+                    "(SELECT id FROM recent_requests ORDER BY id DESC LIMIT 100)"
+                )
+                conn.commit()
+        except Exception as e:
+            logger.debug(f"Failed to save recent request: {e}")
 
     def inc_request(self, endpoint: str, status_code: int, model: str = "unknown") -> None:
         """
@@ -106,6 +270,7 @@ class PrometheusMetrics:
         with self._lock:
             key = f"{endpoint}:{status_code}:{model}"
             self._request_total[key] += 1
+            self._save_counter(f"req:{key}", self._request_total[key])
 
     def inc_error(self, error_type: str) -> None:
         """
@@ -116,6 +281,7 @@ class PrometheusMetrics:
         """
         with self._lock:
             self._error_total[error_type] += 1
+            self._save_counter(f"err:{error_type}", self._error_total[error_type])
 
     def inc_retry(self, endpoint: str) -> None:
         """
@@ -126,6 +292,7 @@ class PrometheusMetrics:
         """
         with self._lock:
             self._retry_total[endpoint] += 1
+            self._save_counter(f"retry:{endpoint}", self._retry_total[endpoint])
 
     def observe_latency(self, endpoint: str, latency: float) -> None:
         """
@@ -157,6 +324,8 @@ class PrometheusMetrics:
         with self._lock:
             self._input_tokens_total[model] += input_tokens
             self._output_tokens_total[model] += output_tokens
+            self._save_counter(f"in_tok:{model}", self._input_tokens_total[model])
+            self._save_counter(f"out_tok:{model}", self._output_tokens_total[model])
 
     def set_active_connections(self, count: int) -> None:
         """Set active connection count."""
@@ -207,11 +376,14 @@ class PrometheusMetrics:
             # Increment stream/non-stream counters
             if is_stream:
                 self._stream_requests += 1
+                self._save_counter("stream_requests", self._stream_requests)
             else:
                 self._non_stream_requests += 1
+                self._save_counter("non_stream_requests", self._non_stream_requests)
 
             # Track API type usage
             self._api_type_usage[api_type] += 1
+            self._save_counter(f"api:{api_type}", self._api_type_usage[api_type])
 
             # Add to response times (keep last N)
             self._response_times.append(duration_ms)
@@ -219,16 +391,30 @@ class PrometheusMetrics:
                 self._response_times.pop(0)
 
             # Add to recent requests (keep last N)
-            self._recent_requests.append({
-                "timestamp": int(time.time() * 1000),
+            now = int(time.time() * 1000)
+            req = {
+                "timestamp": now,
                 "apiType": api_type,
                 "path": endpoint,
                 "status": status_code,
                 "duration": duration_ms,
                 "model": model
-            })
+            }
+            self._recent_requests.append(req)
             if len(self._recent_requests) > self.MAX_RECENT_REQUESTS:
                 self._recent_requests.pop(0)
+            self._save_recent_request(req)
+
+            # Track hourly requests
+            hour_ts = (now // 3600000) * 3600000
+            self._hourly_requests[hour_ts] += 1
+            self._save_hourly(hour_ts, self._hourly_requests[hour_ts])
+            # Clean up old hourly data (keep only last 24 hours)
+            cutoff = hour_ts - 24 * 3600000
+            self._hourly_requests = defaultdict(
+                int,
+                {k: v for k, v in self._hourly_requests.items() if k >= cutoff}
+            )
 
     def get_deno_compatible_metrics(self) -> Dict:
         """
@@ -257,13 +443,31 @@ class PrometheusMetrics:
             if self._response_times:
                 avg_response_time = sum(self._response_times) / len(self._response_times)
 
-            # Aggregate model usage
+            # Aggregate model usage from recent requests (more accurate)
             model_usage = {}
-            for key, count in self._request_total.items():
-                parts = key.split(":")
-                if len(parts) >= 3:
-                    model = parts[2]
-                    model_usage[model] = model_usage.get(model, 0) + count
+            for req in self._recent_requests:
+                model = req.get("model", "unknown")
+                if model and model != "unknown":
+                    model_usage[model] = model_usage.get(model, 0) + 1
+            # Fallback to _request_total if no recent requests
+            if not model_usage:
+                for key, count in self._request_total.items():
+                    parts = key.split(":")
+                    if len(parts) >= 3:
+                        model = parts[2]
+                        if model != "unknown":
+                            model_usage[model] = model_usage.get(model, 0) + count
+
+            # Build 24-hour request data
+            now = int(time.time() * 1000)
+            current_hour = (now // 3600000) * 3600000
+            hourly_data = []
+            for i in range(24):
+                hour_ts = current_hour - (23 - i) * 3600000
+                hourly_data.append({
+                    "hour": hour_ts,
+                    "count": self._hourly_requests.get(hour_ts, 0)
+                })
 
             return {
                 "totalRequests": total_requests,
@@ -276,7 +480,8 @@ class PrometheusMetrics:
                 "modelUsage": model_usage,
                 "apiTypeUsage": dict(self._api_type_usage),
                 "recentRequests": list(self._recent_requests),
-                "startTime": int(self._start_time * 1000)
+                "startTime": int(self._start_time * 1000),
+                "hourlyRequests": hourly_data
             }
 
     def get_metrics(self) -> Dict:
@@ -466,6 +671,131 @@ class PrometheusMetrics:
             lines.append(f"kirogate_uptime_seconds {round(time.time() - self._start_time, 2)}")
 
         return "\n".join(lines) + "\n"
+
+    # ==================== IP Statistics & Admin Methods ====================
+
+    def record_ip(self, ip: str) -> None:
+        """Record IP request."""
+        if not ip:
+            return
+        with self._lock:
+            self._ip_requests[ip] += 1
+            now = int(time.time() * 1000)
+            self._ip_last_seen[ip] = now
+            # Save to DB
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO ip_stats (ip, count, last_seen) VALUES (?, ?, ?)",
+                        (ip, self._ip_requests[ip], now)
+                    )
+                    conn.commit()
+            except Exception as e:
+                logger.debug(f"Failed to save IP stats: {e}")
+
+    def get_ip_stats(self, limit: int = 100) -> List[Dict]:
+        """Get IP statistics sorted by request count."""
+        with self._lock:
+            stats = [
+                {"ip": ip, "count": count, "lastSeen": self._ip_last_seen.get(ip, 0)}
+                for ip, count in self._ip_requests.items()
+            ]
+            stats.sort(key=lambda x: x["count"], reverse=True)
+            return stats[:limit]
+
+    def is_ip_banned(self, ip: str) -> bool:
+        """Check if IP is banned."""
+        with self._lock:
+            return ip in self._ip_blacklist
+
+    def ban_ip(self, ip: str, reason: str = "") -> bool:
+        """Ban an IP address."""
+        if not ip:
+            return False
+        with self._lock:
+            now = int(time.time() * 1000)
+            self._ip_blacklist[ip] = {"banned_at": now, "reason": reason}
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO ip_blacklist (ip, banned_at, reason) VALUES (?, ?, ?)",
+                        (ip, now, reason)
+                    )
+                    conn.commit()
+                logger.info(f"Banned IP: {ip}, reason: {reason}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to ban IP: {e}")
+                return False
+
+    def unban_ip(self, ip: str) -> bool:
+        """Unban an IP address."""
+        if not ip:
+            return False
+        with self._lock:
+            if ip in self._ip_blacklist:
+                del self._ip_blacklist[ip]
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute("DELETE FROM ip_blacklist WHERE ip = ?", (ip,))
+                    conn.commit()
+                logger.info(f"Unbanned IP: {ip}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to unban IP: {e}")
+                return False
+
+    def get_blacklist(self) -> List[Dict]:
+        """Get IP blacklist."""
+        with self._lock:
+            return [
+                {"ip": ip, "bannedAt": info["banned_at"], "reason": info["reason"]}
+                for ip, info in self._ip_blacklist.items()
+            ]
+
+    def is_site_enabled(self) -> bool:
+        """Check if site is enabled."""
+        with self._lock:
+            return self._site_enabled
+
+    def set_site_enabled(self, enabled: bool) -> bool:
+        """Enable or disable site."""
+        with self._lock:
+            self._site_enabled = enabled
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO site_config (key, value) VALUES (?, ?)",
+                        ("site_enabled", "true" if enabled else "false")
+                    )
+                    conn.commit()
+                logger.info(f"Site enabled: {enabled}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to set site status: {e}")
+                return False
+
+    def get_admin_stats(self) -> Dict:
+        """Get statistics for admin dashboard."""
+        with self._lock:
+            total_requests = sum(self._request_total.values())
+            success_requests = sum(
+                c for k, c in self._request_total.items()
+                if len(k.split(":")) >= 2 and 200 <= int(k.split(":")[1]) < 400
+            )
+            return {
+                "totalRequests": total_requests,
+                "successRequests": success_requests,
+                "failedRequests": total_requests - success_requests,
+                "streamRequests": self._stream_requests,
+                "nonStreamRequests": self._non_stream_requests,
+                "activeConnections": self._active_connections,
+                "tokenValid": self._token_valid,
+                "siteEnabled": self._site_enabled,
+                "uptimeSeconds": round(time.time() - self._start_time, 2),
+                "totalIPs": len(self._ip_requests),
+                "bannedIPs": len(self._ip_blacklist),
+            }
 
 
 # Global metrics instance

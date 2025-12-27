@@ -36,10 +36,28 @@ services:
       # 调试模式
       - DEBUG_MODE=${DEBUG_MODE:-off}
 
-    # 如果使用凭证文件，取消下面的注释
-    # volumes:
-    #   - ~/.aws/sso/cache/kiro-auth-token.json:/app/credentials.json:ro
-    # 然后设置 KIRO_CREDS_FILE=/app/credentials.json
+      # Admin 管理后台
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - ADMIN_SECRET_KEY=${ADMIN_SECRET_KEY:-change-me-in-production}
+
+      # OAuth2 用户登录（可选）
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OAUTH_REDIRECT_URI=${OAUTH_REDIRECT_URI:-}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID:-}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET:-}
+      - GITHUB_REDIRECT_URI=${GITHUB_REDIRECT_URI:-}
+
+      # 用户系统配置
+      - USER_SESSION_SECRET=${USER_SESSION_SECRET:-change-me-in-production}
+      - TOKEN_ENCRYPT_KEY=${TOKEN_ENCRYPT_KEY:-change-me-32-bytes-key!!}
+
+    volumes:
+      # 持久化统计数据
+      - kirogate_data:/app/data
+      # 如果使用凭证文件，取消下面的注释
+      # - ~/.aws/sso/cache/kiro-auth-token.json:/app/credentials.json:ro
+      # 然后设置 KIRO_CREDS_FILE=/app/credentials.json
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -47,3 +65,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+volumes:
+  kirogate_data:

@@ -32,6 +32,9 @@
 | **自动重试** | 遇到错误时自动重试 (403, 429, 5xx) |
 | **多模型支持** | 支持多种 Claude 模型版本 |
 | **智能 Token 管理** | 自动在过期前刷新凭证 |
+| **用户系统** | 支持 LinuxDo/GitHub OAuth2 登录 |
+| **Token 捐献** | 用户可捐献 Token 共享使用 |
+| **API Key 生成** | 生成 sk-xxx 格式的 API Key |
 | **模块化架构** | 易于扩展新的提供商 |
 
 ---
@@ -506,13 +509,142 @@ kiro-bridge/
 │   ├── streaming.py           # 响应流处理逻辑
 │   ├── http_client.py         # HTTP 客户端（带重试逻辑）
 │   ├── debug_logger.py        # 调试日志（可选）
-│   └── routes.py              # FastAPI 路由
+│   ├── routes.py              # FastAPI 路由
+│   ├── pages.py               # HTML 页面渲染
+│   ├── database.py            # 用户系统数据库
+│   ├── user_manager.py        # 用户管理和 OAuth2
+│   ├── token_allocator.py     # Token 智能分配
+│   └── health_checker.py      # Token 健康检查
+│
+├── data/                      # 数据目录（自动创建）
+│   └── users.db               # 用户数据库
 │
 ├── tests/                     # 测试
 │   ├── unit/                  # 单元测试
 │   └── integration/           # 集成测试
 │
 └── debug_logs/                # 调试日志（启用时生成）
+```
+
+---
+
+## 🛡️ Admin 管理后台
+
+KiroGate 提供了一个隐藏的管理后台，用于监控和管理服务。
+
+### 访问方式
+
+```
+/admin/login  → 登录页面
+/admin        → 管理面板（需登录）
+/admin/logout → 退出登录
+```
+
+> **注意**: Admin 页面不会显示在导航菜单和 Swagger 文档中。
+
+### 功能列表
+
+| 功能 | 说明 |
+|------|------|
+| 📊 **概览面板** | 站点状态、Token 状态、总请求数、成功率 |
+| 🌐 **IP 统计** | 请求来源 IP、请求次数、最后访问时间 |
+| 🚫 **黑名单管理** | 封禁/解封 IP 地址 |
+| ⚙️ **系统控制** | 站点开关、刷新 Token、清除缓存 |
+
+### 配置
+
+在 `.env` 文件中配置：
+
+```env
+# 管理员密码（请在生产环境中设置强密码！）
+ADMIN_PASSWORD="your-secure-password"
+
+# Session 签名密钥（请使用随机字符串）
+ADMIN_SECRET_KEY="your-random-secret-key"
+
+# Session 有效期（秒），默认 24 小时
+ADMIN_SESSION_MAX_AGE=86400
+```
+
+### Docker 部署
+
+```bash
+docker run -d -p 8000:8000 \
+  -e PROXY_API_KEY="your-password" \
+  -e ADMIN_PASSWORD="your-admin-password" \
+  -e ADMIN_SECRET_KEY="your-random-secret" \
+  -v kirogate_data:/app/data \
+  --name kirogate kirogate
+```
+
+---
+
+## 👥 用户系统
+
+KiroGate 支持用户注册登录，用户可以捐献 Token 并生成自己的 API Key。
+
+### 登录方式
+
+支持两种 OAuth2 登录方式：
+
+| 提供商 | 配置 | 获取地址 |
+|--------|------|----------|
+| **LinuxDo** | `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET` | https://connect.linux.do |
+| **GitHub** | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | https://github.com/settings/developers |
+
+### 功能说明
+
+| 功能 | 说明 |
+|------|------|
+| 🔐 **多方式登录** | 支持 LinuxDo 和 GitHub OAuth2 登录 |
+| 🎁 **Token 捐献** | 用户可捐献 Refresh Token，选择公开或私有 |
+| 🔑 **API Key 生成** | 生成 `sk-xxx` 格式的 API Key |
+| 📊 **使用统计** | 查看 Token 成功率和使用次数 |
+| 🌐 **公开 Token 池** | 公开的 Token 供所有用户共享使用 |
+
+### 配置示例
+
+```env
+# LinuxDo OAuth2
+OAUTH_CLIENT_ID="your-linuxdo-client-id"
+OAUTH_CLIENT_SECRET="your-linuxdo-client-secret"
+OAUTH_REDIRECT_URI="https://your-domain.com/oauth2/callback"
+
+# GitHub OAuth2
+GITHUB_CLIENT_ID="your-github-client-id"
+GITHUB_CLIENT_SECRET="your-github-client-secret"
+GITHUB_REDIRECT_URI="https://your-domain.com/oauth2/github/callback"
+
+# 用户系统安全配置
+USER_SESSION_SECRET="your-random-secret-key"
+TOKEN_ENCRYPT_KEY="your-32-byte-encrypt-key-here!!"
+```
+
+### 用户端点
+
+| 端点 | 说明 |
+|------|------|
+| `/login` | 登录选择页面 |
+| `/user` | 用户中心（Token 管理、API Key 管理） |
+| `/tokens` | 公开 Token 池 |
+| `/oauth2/logout` | 退出登录 |
+
+### 使用 API Key
+
+用户生成的 `sk-xxx` 格式 API Key 可直接用于 API 调用：
+
+```bash
+# OpenAI 格式
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer sk-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-sonnet-4-5", "messages": [{"role": "user", "content": "你好"}]}'
+
+# Anthropic 格式
+curl http://localhost:8000/v1/messages \
+  -H "x-api-key: sk-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-sonnet-4-5", "max_tokens": 1024, "messages": [{"role": "user", "content": "你好"}]}'
 ```
 
 ---
