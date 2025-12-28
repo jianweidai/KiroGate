@@ -33,7 +33,7 @@ from threading import Lock
 
 from loguru import logger
 
-from kiro_gateway.config import APP_VERSION
+from kiro_gateway.config import APP_VERSION, settings
 
 METRICS_DB_FILE = os.getenv("METRICS_DB_FILE", "data/metrics.db")
 
@@ -106,6 +106,7 @@ class PrometheusMetrics:
         self._ip_last_seen: Dict[str, int] = {}  # {ip: timestamp_ms}
         self._ip_blacklist: Dict[str, Dict] = {}  # {ip: {banned_at, reason}}
         self._site_enabled: bool = True  # Site on/off switch
+        self._proxy_api_key: str = settings.proxy_api_key
 
         # Load persisted data
         self._load_from_db()
@@ -207,6 +208,11 @@ class PrometheusMetrics:
                 row = cursor.fetchone()
                 if row:
                     self._site_enabled = row[1] == "true"
+
+                cursor = conn.execute("SELECT key, value FROM site_config WHERE key = 'proxy_api_key'")
+                row = cursor.fetchone()
+                if row and row[1]:
+                    self._proxy_api_key = row[1]
 
                 logger.info(f"Loaded metrics from {self._db_path}")
         except Exception as e:
@@ -804,6 +810,31 @@ class PrometheusMetrics:
                 return True
             except Exception as e:
                 logger.error(f"Failed to set site status: {e}")
+                return False
+
+    def get_proxy_api_key(self) -> str:
+        """Get current proxy API key."""
+        with self._lock:
+            return self._proxy_api_key
+
+    def set_proxy_api_key(self, api_key: str) -> bool:
+        """Update proxy API key."""
+        api_key = api_key.strip()
+        if not api_key:
+            return False
+        with self._lock:
+            self._proxy_api_key = api_key
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO site_config (key, value) VALUES (?, ?)",
+                        ("proxy_api_key", api_key)
+                    )
+                    conn.commit()
+                logger.info("Proxy API key updated")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to set proxy API key: {e}")
                 return False
 
     def get_admin_stats(self) -> Dict:

@@ -1998,6 +1998,22 @@ def render_admin_page() -> str:
         </div>
 
         <div class="card">
+          <h2 class="text-lg font-semibold mb-4">🔐 Proxy API Key</h2>
+          <div class="space-y-3">
+            <input id="proxyApiKeyInput" type="password" class="w-full rounded px-3 py-2"
+              style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);"
+              placeholder="未加载">
+            <div class="flex flex-wrap items-center gap-2">
+              <button onclick="refreshProxyApiKey()" class="btn" style="background: var(--bg-input); border: 1px solid var(--border);">刷新</button>
+              <button onclick="toggleProxyApiKey()" id="proxyApiKeyToggle" class="btn" style="background: var(--bg-input); border: 1px solid var(--border);">显示</button>
+              <button onclick="copyProxyApiKey()" class="btn" style="background: var(--bg-input); border: 1px solid var(--border);">复制</button>
+              <button onclick="saveProxyApiKey()" class="btn btn-primary">保存</button>
+            </div>
+            <p class="text-xs" style="color: var(--text-muted);">保存后立即生效，旧 Key 会失效。</p>
+          </div>
+        </div>
+
+        <div class="card">
           <h2 class="text-lg font-semibold mb-4">🔧 系统操作</h2>
           <div class="space-y-3">
             <button onclick="refreshToken()" class="w-full btn btn-primary flex items-center justify-center gap-2">
@@ -2083,6 +2099,54 @@ def render_admin_page() -> str:
       }}
     }}
 
+    async function refreshProxyApiKey() {{
+      try {{
+        const d = await fetchJson('/admin/api/proxy-key');
+        const input = document.getElementById('proxyApiKeyInput');
+        if (input) input.value = d.proxy_api_key || '';
+      }} catch (e) {{ console.error(e); }}
+    }}
+
+    function toggleProxyApiKey() {{
+      const input = document.getElementById('proxyApiKeyInput');
+      const btn = document.getElementById('proxyApiKeyToggle');
+      if (!input || !btn) return;
+      const isHidden = input.type === 'password';
+      input.type = isHidden ? 'text' : 'password';
+      btn.textContent = isHidden ? '隐藏' : '显示';
+    }}
+
+    async function copyProxyApiKey() {{
+      const input = document.getElementById('proxyApiKeyInput');
+      if (!input || !input.value) return;
+      try {{
+        await navigator.clipboard.writeText(input.value);
+        alert('已复制');
+      }} catch (e) {{
+        input.select();
+        document.execCommand('copy');
+        alert('已复制');
+      }}
+    }}
+
+    async function saveProxyApiKey() {{
+      const input = document.getElementById('proxyApiKeyInput');
+      const value = input ? input.value.trim() : '';
+      if (!value) {{
+        alert('请填写 API Key');
+        return;
+      }}
+      const fd = new FormData();
+      fd.append('proxy_api_key', value);
+      try {{
+        await fetchJson('/admin/api/proxy-key', {{ method: 'POST', body: fd }});
+        alert('保存成功');
+        refreshProxyApiKey();
+      }} catch (e) {{
+        alert(e.error || '保存失败');
+      }}
+    }}
+
     function renderTokenStatus(status) {{
       if (status === 'active') return '<span class="text-green-400">有效</span>';
       if (status === 'invalid') return '<span class="text-red-400">无效</span>';
@@ -2138,6 +2202,7 @@ def render_admin_page() -> str:
       if (tab === 'blacklist') refreshBlacklist();
       if (tab === 'tokens') refreshTokenList();
       if (tab === 'announcement') refreshAnnouncement();
+      if (tab === 'system') refreshProxyApiKey();
     }}
 
     async function refreshStats() {{
@@ -2976,6 +3041,7 @@ def render_admin_page() -> str:
 
     refreshStats();
     refreshAnnouncement();
+    refreshProxyApiKey();
     setInterval(refreshStats, 10000);
 
     // Theme management

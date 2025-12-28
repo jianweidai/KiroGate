@@ -143,6 +143,17 @@ def _mask_token(token: str) -> str:
     return f"{token[:4]}...{token[-4:]}"
 
 
+def _get_proxy_api_key(request: Request | None = None) -> str:
+    try:
+        from kiro_gateway.metrics import metrics
+        proxy_key = metrics.get_proxy_api_key()
+        if proxy_key:
+            return proxy_key
+    except Exception:
+        pass
+    return PROXY_API_KEY
+
+
 def _is_https_request(request: Request) -> bool:
     """Return True if request is HTTPS (including proxy headers)."""
     forwarded_proto = request.headers.get("x-forwarded-proto")
@@ -218,6 +229,8 @@ async def _parse_auth_header(auth_header: str, request: Request = None) -> tuple
 
     token = auth_header[7:]  # Remove "Bearer "
 
+    proxy_api_key = _get_proxy_api_key(request)
+
     # Check if token contains ':' (multi-tenant format)
     if ':' in token:
         parts = token.split(':', 1)  # Split only once
@@ -225,7 +238,7 @@ async def _parse_auth_header(auth_header: str, request: Request = None) -> tuple
         refresh_token = parts[1]
 
         # Verify proxy key
-        if not secrets.compare_digest(proxy_key, PROXY_API_KEY):
+        if not secrets.compare_digest(proxy_key, proxy_api_key):
             logger.warning(f"[{get_timestamp()}] 多租户模式下 Proxy Key 无效: {_mask_token(proxy_key)}")
             raise HTTPException(status_code=401, detail="API Key 无效或缺失")
 
@@ -273,7 +286,7 @@ async def _parse_auth_header(auth_header: str, request: Request = None) -> tuple
             raise HTTPException(status_code=503, detail="该用户暂无可用的 Token")
     else:
         # Traditional mode: verify entire token as PROXY_API_KEY
-        if not secrets.compare_digest(token, PROXY_API_KEY):
+        if not secrets.compare_digest(token, proxy_api_key):
             logger.warning(f"[{get_timestamp()}] 传统模式下 API Key 无效")
             raise HTTPException(status_code=401, detail="API Key 无效或缺失")
 
@@ -340,6 +353,8 @@ async def verify_anthropic_api_key(
     Raises:
         HTTPException: 401 if key is invalid or missing
     """
+    proxy_api_key = _get_proxy_api_key(request)
+
     # Try x-api-key first (Anthropic format)
     if x_api_key:
         # Check if x-api-key contains ':' (multi-tenant format)
@@ -349,7 +364,7 @@ async def verify_anthropic_api_key(
             refresh_token = parts[1]
 
             # Verify proxy key
-            if not secrets.compare_digest(proxy_key, PROXY_API_KEY):
+            if not secrets.compare_digest(proxy_key, proxy_api_key):
                 logger.warning(f"[{get_timestamp()}] x-api-key 多租户模式下 Proxy Key 无效: {_mask_token(proxy_key)}")
                 raise HTTPException(status_code=401, detail="API Key 无效或缺失")
 
@@ -394,7 +409,7 @@ async def verify_anthropic_api_key(
                 raise HTTPException(status_code=503, detail="该用户暂无可用的 Token")
         else:
             # Traditional mode: verify entire x-api-key as PROXY_API_KEY
-            if secrets.compare_digest(x_api_key, PROXY_API_KEY):
+            if secrets.compare_digest(x_api_key, proxy_api_key):
                 logger.debug(f"[{get_timestamp()}] x-api-key 传统模式: 使用全局 AuthManager")
                 return request.app.state.auth_manager
 
@@ -954,6 +969,36 @@ async def admin_toggle_site(
     from kiro_gateway.metrics import metrics
     success = metrics.set_site_enabled(enabled)
     return {"success": success, "enabled": enabled}
+
+
+@router.get("/admin/api/proxy-key", include_in_schema=False)
+async def admin_get_proxy_key(request: Request):
+    """Get proxy API key."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+    from kiro_gateway.metrics import metrics
+    return {"proxy_api_key": metrics.get_proxy_api_key()}
+
+
+@router.post("/admin/api/proxy-key", include_in_schema=False)
+async def admin_set_proxy_key(
+    request: Request,
+    proxy_api_key: str = Form(...),
+    _csrf: None = Depends(require_same_origin)
+):
+    """Update proxy API key."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+    proxy_api_key = proxy_api_key.strip()
+    if not proxy_api_key:
+        return JSONResponse(status_code=400, content={"error": "API Key 不能为空"})
+    from kiro_gateway.metrics import metrics
+    success = metrics.set_proxy_api_key(proxy_api_key)
+    if not success:
+        return JSONResponse(status_code=500, content={"error": "更新失败"})
+    return {"success": True}
 
 
 @router.post("/admin/api/refresh-token", include_in_schema=False)
