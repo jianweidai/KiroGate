@@ -35,6 +35,7 @@ from loguru import logger
 from kiro_gateway.auth import KiroAuthManager
 from kiro_gateway.cache import ModelInfoCache
 from kiro_gateway.converters import build_kiro_payload, convert_anthropic_to_openai_request
+from kiro_gateway.config import settings
 from kiro_gateway.http_client import KiroHttpClient
 from kiro_gateway.models import (
     ChatCompletionRequest,
@@ -109,7 +110,8 @@ class RequestHandler:
         response,
         http_client: KiroHttpClient,
         endpoint_name: str,
-        error_format: str = "openai"
+        error_format: str = "openai",
+        request: Optional[Request] = None
     ) -> JSONResponse:
         """
         处理 API 错误。
@@ -126,7 +128,7 @@ class RequestHandler:
         try:
             error_content = await response.aread()
         except Exception:
-            error_content = b"Unknown error"
+            error_content = "未知错误".encode("utf-8")
 
         await http_client.close()
         error_text = error_content.decode('utf-8', errors='replace')
@@ -134,12 +136,21 @@ class RequestHandler:
 
         # 尝试解析 JSON 错误响应
         error_message = error_text
+        error_reason = None
         try:
             error_json = json.loads(error_text)
-            if "message" in error_json:
-                error_message = error_json["message"]
+            if isinstance(error_json, dict):
                 if "reason" in error_json:
-                    error_message = f"{error_message} (reason: {error_json['reason']})"
+                    error_reason = str(error_json["reason"])
+                if "message" in error_json:
+                    error_message = error_json["message"]
+                elif "error" in error_json and isinstance(error_json["error"], dict):
+                    if "message" in error_json["error"]:
+                        error_message = error_json["error"]["message"]
+                    if not error_reason and "reason" in error_json["error"]:
+                        error_reason = str(error_json["error"]["reason"])
+                if error_reason:
+                    error_message = f"{error_message} (reason: {error_reason})"
         except (json.JSONDecodeError, KeyError):
             pass
 
@@ -147,6 +158,17 @@ class RequestHandler:
 
         if debug_logger:
             debug_logger.flush_on_error(response.status_code, error_message)
+
+        if request and hasattr(request.state, "donated_token_id"):
+            reason_text = error_reason or error_message
+            if "MONTHLY_REQUEST_COUNT" in reason_text:
+                try:
+                    from kiro_gateway.database import user_db
+                    token_id = request.state.donated_token_id
+                    user_db.set_token_status(token_id, "expired")
+                    logger.warning(f"Token {token_id} marked expired due to monthly limit")
+                except Exception as e:
+                    logger.warning(f"Failed to mark token expired: {e}")
 
         # 根据格式返回错误
         if error_format == "anthropic":
@@ -415,7 +437,7 @@ class RequestHandler:
                 openai_request = convert_anthropic_to_openai_request(request_data)
             except Exception as e:
                 logger.error(f"Failed to convert Anthropic request: {e}")
-                raise HTTPException(status_code=400, detail=f"Invalid request format: {str(e)}")
+                raise HTTPException(status_code=400, detail=f"请求格式无效: {str(e)}")
         else:
             openai_request = request_data
 
@@ -462,7 +484,8 @@ class RequestHandler:
                     response,
                     http_client,
                     endpoint_name,
-                    response_format
+                    response_format,
+                    request=request
                 )
 
             # 准备 token 计数数据
@@ -563,4 +586,8 @@ class RequestHandler:
             RequestHandler.log_error(endpoint_name, error_msg, 500)
             if debug_logger:
                 debug_logger.flush_on_error(500, error_msg)
-            raise HTTPException(status_code=500, detail=f"Internal Server Error: {error_msg}")
+            if settings.debug_mode == "off":
+                detail = "服务器内部错误"
+            else:
+                detail = f"服务器内部错误: {error_msg}"
+            raise HTTPException(status_code=500, detail=detail)
