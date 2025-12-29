@@ -27,6 +27,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -59,6 +60,19 @@ def get_client_ip(request: Request) -> str:
     if x_forwarded_for:
         return x_forwarded_for.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def normalize_endpoint_path(raw_path: str) -> str:
+    """Normalize absolute-form or scheme-less paths to a plain URL path."""
+    if not raw_path:
+        return "/"
+    if "://" in raw_path:
+        parsed = urlsplit(raw_path)
+        return parsed.path or "/"
+    if raw_path.startswith("//"):
+        parsed = urlsplit(f"http:{raw_path}")
+        return parsed.path or "/"
+    return raw_path
 
 
 class RequestTrackingMiddleware(BaseHTTPMiddleware):
@@ -158,7 +172,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         from kiro_gateway.metrics import metrics
 
         start_time = time.time()
-        endpoint = request.url.path
+        endpoint = normalize_endpoint_path(request.url.path)
         model = "unknown"
 
         # Record client IP

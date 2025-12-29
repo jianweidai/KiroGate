@@ -110,6 +110,26 @@ class KiroHttpClient:
         self.auth_manager = auth_manager
         self.client = None  # Will use global client
 
+    def _extract_model_from_payload(self, json_data: Optional[dict]) -> str:
+        """Extract model name from common payload locations."""
+        if not json_data:
+            return ""
+        model = json_data.get("modelId") or json_data.get("model")
+        if model:
+            return model
+        conversation = json_data.get("conversationState") or {}
+        current = conversation.get("currentMessage") or {}
+        user_input = current.get("userInputMessage") or {}
+        model = user_input.get("modelId") or user_input.get("model")
+        if model:
+            return model
+        history = conversation.get("history") or []
+        for entry in reversed(history):
+            user_input = entry.get("userInputMessage") if isinstance(entry, dict) else None
+            if user_input and user_input.get("modelId"):
+                return user_input.get("modelId")
+        return ""
+
     async def _get_client(self) -> httpx.AsyncClient:
         """
         Get HTTP client (uses global connection pool).
@@ -161,7 +181,7 @@ class KiroHttpClient:
         """
         # 从 json_data 中提取模型名称（如果未提供）
         if model is None:
-            model = json_data.get("modelId", "") if json_data else ""
+            model = self._extract_model_from_payload(json_data)
 
         if stream:
             # 流式请求：使用较长的连接超时，实际读取超时在 streaming.py 中控制

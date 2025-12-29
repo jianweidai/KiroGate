@@ -284,6 +284,27 @@ class PrometheusMetrics:
             self._request_total[key] += 1
             self._save_counter(f"req:{key}", self._request_total[key])
 
+    def _split_request_key(self, key: str) -> Tuple[str, str, str]:
+        """Split request key safely, allowing ':' in endpoints."""
+        parts = key.rsplit(":", 2)
+        if len(parts) == 3:
+            endpoint, status, model = parts
+        elif len(parts) == 2:
+            endpoint, status = parts
+            model = "unknown"
+        else:
+            endpoint, status, model = key, "unknown", "unknown"
+        return endpoint, status, model
+
+    def _is_success_status(self, key: str) -> bool:
+        """Check if request key has a successful HTTP status."""
+        _endpoint, status_str, _model = self._split_request_key(key)
+        try:
+            status = int(status_str)
+        except ValueError:
+            return False
+        return 200 <= status < 400
+
     def inc_error(self, error_type: str) -> None:
         """
         Increment error count.
@@ -442,13 +463,16 @@ class PrometheusMetrics:
             failed_requests = 0
 
             for key, count in self._request_total.items():
-                parts = key.split(":")
-                if len(parts) >= 2:
-                    status = int(parts[1])
-                    if 200 <= status < 400:
-                        success_requests += count
-                    else:
-                        failed_requests += count
+                _endpoint, status_str, _model = self._split_request_key(key)
+                try:
+                    status = int(status_str)
+                except ValueError:
+                    failed_requests += count
+                    continue
+                if 200 <= status < 400:
+                    success_requests += count
+                else:
+                    failed_requests += count
 
             # Calculate average response time
             avg_response_time = 0.0
@@ -464,11 +488,9 @@ class PrometheusMetrics:
             # Fallback to _request_total if no recent requests
             if not model_usage:
                 for key, count in self._request_total.items():
-                    parts = key.split(":")
-                    if len(parts) >= 3:
-                        model = parts[2]
-                        if model != "unknown":
-                            model_usage[model] = model_usage.get(model, 0) + count
+                    _endpoint, _status, model = self._split_request_key(key)
+                    if model != "unknown":
+                        model_usage[model] = model_usage.get(model, 0) + count
 
             # Build 24-hour request data
             now = int(time.time() * 1000)
@@ -579,7 +601,7 @@ class PrometheusMetrics:
         """Aggregate request count by endpoint."""
         result = defaultdict(int)
         for key, count in self._request_total.items():
-            endpoint = key.split(":")[0]
+            endpoint, _status, _model = self._split_request_key(key)
             result[endpoint] += count
         return dict(result)
 
@@ -587,7 +609,7 @@ class PrometheusMetrics:
         """Aggregate request count by status code."""
         result = defaultdict(int)
         for key, count in self._request_total.items():
-            status = key.split(":")[1]
+            _endpoint, status, _model = self._split_request_key(key)
             result[status] += count
         return dict(result)
 
@@ -595,10 +617,8 @@ class PrometheusMetrics:
         """Aggregate request count by model."""
         result = defaultdict(int)
         for key, count in self._request_total.items():
-            parts = key.split(":")
-            if len(parts) >= 3:
-                model = parts[2]
-                result[model] += count
+            _endpoint, _status, model = self._split_request_key(key)
+            result[model] += count
         return dict(result)
 
     def export_prometheus(self) -> str:
@@ -620,8 +640,7 @@ class PrometheusMetrics:
             lines.append("# HELP kirogate_requests_total Total number of requests")
             lines.append("# TYPE kirogate_requests_total counter")
             for key, count in self._request_total.items():
-                parts = key.split(":")
-                endpoint, status, model = parts[0], parts[1], parts[2] if len(parts) > 2 else "unknown"
+                endpoint, status, model = self._split_request_key(key)
                 lines.append(
                     f'kirogate_requests_total{{endpoint="{endpoint}",status="{status}",model="{model}"}} {count}'
                 )
@@ -871,7 +890,7 @@ class PrometheusMetrics:
             total_requests = sum(self._request_total.values())
             success_requests = sum(
                 c for k, c in self._request_total.items()
-                if len(k.split(":")) >= 2 and 200 <= int(k.split(":")[1]) < 400
+                if self._is_success_status(k)
             )
             return {
                 "totalRequests": total_requests,

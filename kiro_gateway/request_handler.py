@@ -467,7 +467,8 @@ class RequestHandler:
                 "POST",
                 url,
                 kiro_payload,
-                stream=True
+                stream=True,
+                model=request_data.model
             )
 
             if response.status_code != 200:
