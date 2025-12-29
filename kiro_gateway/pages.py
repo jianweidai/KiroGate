@@ -2685,6 +2685,30 @@ def render_admin_page() -> str:
         </div>
 
         <div class="card">
+          <h2 class="text-lg font-semibold mb-4">💾 数据导入导出</h2>
+          <div class="space-y-3">
+            <button onclick="exportDatabase()" class="w-full btn btn-primary flex items-center justify-center gap-2">
+              <span>⬇️</span> 导出数据库备份
+            </button>
+            <div class="flex flex-col gap-2">
+              <select id="dbImportType" class="w-full rounded px-3 py-2 text-sm"
+                style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+                <option value="all" selected>导入全量备份（zip）</option>
+                <option value="users">仅用户数据库</option>
+                <option value="metrics">仅统计数据库</option>
+              </select>
+              <input id="dbImportFile" type="file" accept=".zip,.db" class="w-full rounded px-3 py-2 text-sm"
+                style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+              <button onclick="importDatabase()" class="w-full btn flex items-center justify-center gap-2"
+                style="background: var(--bg-input); border: 1px solid var(--border);">
+                <span>⬆️</span> 导入数据库
+              </button>
+            </div>
+            <p class="text-xs" style="color: var(--text-muted);">导入会覆盖现有数据，建议先导出备份；完成后请重启服务以加载最新数据。</p>
+          </div>
+        </div>
+
+        <div class="card">
           <h2 class="text-lg font-semibold mb-4">🔧 系统操作</h2>
           <div class="space-y-3">
             <button onclick="refreshToken()" class="w-full btn btn-primary flex items-center justify-center gap-2">
@@ -2824,6 +2848,31 @@ def render_admin_page() -> str:
         refreshProxyApiKey();
       }} catch (e) {{
         alert(e.error || '保存失败');
+      }}
+    }}
+
+    function exportDatabase() {{
+      window.location.href = '/admin/api/db/export';
+    }}
+
+    async function importDatabase() {{
+      const input = document.getElementById('dbImportFile');
+      if (!input || !input.files || !input.files.length) {{
+        alert('请选择要导入的文件');
+        return;
+      }}
+      const dbType = document.getElementById('dbImportType')?.value || 'all';
+      if (!confirm('导入会覆盖现有数据库，确定继续吗？')) return;
+      const fd = new FormData();
+      fd.append('file', input.files[0]);
+      fd.append('db_type', dbType);
+      try {{
+        const d = await fetchJson('/admin/api/db/import', {{ method: 'POST', body: fd }});
+        alert(d.message || '导入完成');
+      }} catch (e) {{
+        alert(e.error || '导入失败');
+      }} finally {{
+        input.value = '';
       }}
     }}
 

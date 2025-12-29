@@ -32,6 +32,10 @@ import hashlib
 import json
 import re
 import secrets
+import shutil
+import sqlite3
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -799,6 +803,91 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     )
 
 
+USER_DB_REQUIRED_TABLES = {"users"}
+METRICS_DB_REQUIRED_TABLES = {"counters"}
+
+
+def _resolve_db_path(path_value: str) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    project_root = Path(__file__).resolve().parents[1]
+    return (project_root / path).resolve()
+
+
+def _get_db_paths() -> dict[str, Path]:
+    from kiro_gateway.database import USER_DB_FILE
+    from kiro_gateway.metrics import METRICS_DB_FILE
+    return {
+        "users": _resolve_db_path(USER_DB_FILE),
+        "metrics": _resolve_db_path(METRICS_DB_FILE),
+    }
+
+
+def _is_sqlite_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(16)
+        return header.startswith(b"SQLite format 3")
+    except OSError:
+        return False
+
+
+def _validate_sqlite_db(path: Path, required_tables: set[str]) -> tuple[bool, str | None]:
+    if not _is_sqlite_file(path):
+        return False, "文件不是有效的 SQLite 数据库"
+    try:
+        with sqlite3.connect(path) as conn:
+            rows = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+    except sqlite3.Error:
+        return False, "数据库读取失败"
+    missing = required_tables - rows
+    if missing:
+        missing_list = "、".join(sorted(missing))
+        return False, f"数据库缺少必要表：{missing_list}"
+    return True, None
+
+
+def _backup_sqlite_db(src: Path, dest: Path) -> None:
+    if not src.exists():
+        raise FileNotFoundError(f"数据库不存在: {src}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    with sqlite3.connect(src) as conn:
+        with sqlite3.connect(dest) as backup:
+            conn.backup(backup)
+
+
+def _stream_file(path: Path, chunk_size: int = 1024 * 1024):
+    try:
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _replace_db_file(target: Path, new_file: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup = target.with_name(f"{target.stem}.bak-{timestamp}{target.suffix}")
+        shutil.copy2(target, backup)
+    shutil.move(str(new_file), str(target))
+
+
 # ==================== Admin Routes (Hidden from Swagger) ====================
 
 def create_admin_session() -> str:
@@ -1093,6 +1182,163 @@ async def admin_clear_cache(
         return {"success": True, "message": "模型缓存已刷新"}
     except Exception as e:
         return {"success": False, "message": f"模型缓存刷新失败: {str(e)}"}
+
+
+@router.get("/admin/api/db/export", include_in_schema=False)
+async def admin_export_db(
+    request: Request,
+    db_type: str = Query("all")
+):
+    """Export sqlite databases."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+
+    db_type = db_type.strip().lower()
+    if db_type not in {"all", "users", "metrics"}:
+        return JSONResponse(status_code=400, content={"error": "导出类型无效"})
+
+    db_paths = _get_db_paths()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    if db_type == "all":
+        if not db_paths["users"].exists():
+            return JSONResponse(status_code=404, content={"error": "用户数据库不存在"})
+        if not db_paths["metrics"].exists():
+            return JSONResponse(status_code=404, content={"error": "统计数据库不存在"})
+
+        tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+        tmp_zip_path = Path(tmp_zip.name)
+        tmp_zip.close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            user_backup = tmpdir_path / "users.db"
+            metrics_backup = tmpdir_path / "metrics.db"
+            _backup_sqlite_db(db_paths["users"], user_backup)
+            _backup_sqlite_db(db_paths["metrics"], metrics_backup)
+            with zipfile.ZipFile(tmp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.write(user_backup, arcname="users.db")
+                zf.write(metrics_backup, arcname="metrics.db")
+
+        filename = f"kirogate-db-backup-{timestamp}.zip"
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return StreamingResponse(
+            _stream_file(tmp_zip_path),
+            media_type="application/zip",
+            headers=headers
+        )
+
+    key = "users" if db_type == "users" else "metrics"
+    src = db_paths[key]
+    if not src.exists():
+        return JSONResponse(status_code=404, content={"error": "数据库不存在"})
+
+    tmp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp_db_path = Path(tmp_db.name)
+    tmp_db.close()
+    _backup_sqlite_db(src, tmp_db_path)
+
+    filename = f"kirogate-{key}-db-{timestamp}.db"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(
+        _stream_file(tmp_db_path),
+        media_type="application/octet-stream",
+        headers=headers
+    )
+
+
+@router.post("/admin/api/db/import", include_in_schema=False)
+async def admin_import_db(
+    request: Request,
+    file: UploadFile | None = File(None),
+    db_type: str = Form("all"),
+    _csrf: None = Depends(require_same_origin)
+):
+    """Import sqlite databases."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+
+    if not file or not file.filename:
+        return JSONResponse(status_code=400, content={"error": "请选择要导入的文件"})
+
+    db_type = db_type.strip().lower()
+    if db_type not in {"all", "users", "metrics"}:
+        return JSONResponse(status_code=400, content={"error": "导入类型无效"})
+
+    filename = Path(file.filename).name
+    db_paths = _get_db_paths()
+    imported: list[str] = []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        upload_path = tmpdir_path / filename
+        file.file.seek(0)
+        with upload_path.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+
+        if zipfile.is_zipfile(upload_path):
+            name_map = {
+                "users.db": "users",
+                "metrics.db": "metrics",
+            }
+            with zipfile.ZipFile(upload_path) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    base = Path(info.filename).name
+                    key = name_map.get(base)
+                    if not key:
+                        continue
+                    extract_path = tmpdir_path / base
+                    with zf.open(info) as src, extract_path.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                    required = (
+                        USER_DB_REQUIRED_TABLES
+                        if key == "users"
+                        else METRICS_DB_REQUIRED_TABLES
+                    )
+                    ok, error = _validate_sqlite_db(extract_path, required)
+                    if not ok:
+                        return JSONResponse(
+                            status_code=400,
+                            content={"error": f"{base} 无效：{error}"}
+                        )
+                    _replace_db_file(db_paths[key], extract_path)
+                    imported.append(key)
+            if not imported:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "压缩包中未找到 users.db 或 metrics.db"}
+                )
+        else:
+            if db_type == "all":
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "单文件导入请指定导入类型"}
+                )
+            required = (
+                USER_DB_REQUIRED_TABLES
+                if db_type == "users"
+                else METRICS_DB_REQUIRED_TABLES
+            )
+            ok, error = _validate_sqlite_db(upload_path, required)
+            if not ok:
+                return JSONResponse(status_code=400, content={"error": error or "数据库文件无效"})
+            _replace_db_file(db_paths[db_type], upload_path)
+            imported.append(db_type)
+
+    label_map = {
+        "users": "用户数据库",
+        "metrics": "统计数据库",
+    }
+    imported_labels = "、".join(label_map[key] for key in imported)
+    return {
+        "success": True,
+        "imported": imported,
+        "message": f"导入完成：{imported_labels} 已更新。请重启服务以加载最新数据。"
+    }
 
 
 @router.get("/admin/api/tokens", include_in_schema=False)
