@@ -227,7 +227,7 @@ class UserDatabase:
     @contextmanager
     def _get_conn(self):
         """Get database connection with context manager."""
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -403,6 +403,94 @@ class UserDatabase:
             row = conn.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
             return self._row_to_user(row) if row else None
 
+    def get_or_create_user_by_linuxdo(
+        self,
+        linuxdo_id: str,
+        username: str,
+        avatar_url: Optional[str] = None,
+        trust_level: int = 0
+    ) -> User:
+        """
+        Get user by LinuxDo ID, or create if not exists.
+
+        This is an atomic operation to prevent race conditions.
+
+        Returns:
+            Existing or newly created User
+        """
+        with self._lock:
+            # First try to get existing user
+            with self._get_conn() as conn:
+                row = conn.execute("SELECT * FROM users WHERE linuxdo_id = ?", (linuxdo_id,)).fetchone()
+                if row:
+                    return self._row_to_user(row)
+
+            # User doesn't exist, create new one
+            now = int(time.time() * 1000)
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    """INSERT INTO users (linuxdo_id, username, avatar_url, trust_level, created_at, last_login)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (linuxdo_id, username, avatar_url, trust_level, now, now)
+                )
+                user_id = cursor.lastrowid
+                return User(
+                    id=user_id,
+                    linuxdo_id=linuxdo_id,
+                    github_id=None,
+                    username=username,
+                    avatar_url=avatar_url,
+                    trust_level=trust_level,
+                    is_admin=False,
+                    is_banned=False,
+                    created_at=now,
+                    last_login=now
+                )
+
+    def get_or_create_user_by_github(
+        self,
+        github_id: str,
+        username: str,
+        avatar_url: Optional[str] = None,
+        trust_level: int = 0
+    ) -> User:
+        """
+        Get user by GitHub ID, or create if not exists.
+
+        This is an atomic operation to prevent race conditions.
+
+        Returns:
+            Existing or newly created User
+        """
+        with self._lock:
+            # First try to get existing user
+            with self._get_conn() as conn:
+                row = conn.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
+                if row:
+                    return self._row_to_user(row)
+
+            # User doesn't exist, create new one
+            now = int(time.time() * 1000)
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    """INSERT INTO users (github_id, username, avatar_url, trust_level, created_at, last_login)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (github_id, username, avatar_url, trust_level, now, now)
+                )
+                user_id = cursor.lastrowid
+                return User(
+                    id=user_id,
+                    linuxdo_id=None,
+                    github_id=github_id,
+                    username=username,
+                    avatar_url=avatar_url,
+                    trust_level=trust_level,
+                    is_admin=False,
+                    is_banned=False,
+                    created_at=now,
+                    last_login=now
+                )
+
     def update_last_login(self, user_id: int) -> None:
         """Update user's last login time."""
         now = int(time.time() * 1000)
@@ -505,7 +593,8 @@ class UserDatabase:
         if where:
             query += " WHERE " + " AND ".join(where)
         with self._get_conn() as conn:
-            return conn.execute(query, params).fetchone()[0]
+            result = conn.execute(query, params).fetchone()
+            return result[0] if result else 0
 
     def _row_to_user(self, row: sqlite3.Row) -> User:
         """Convert database row to User object."""
@@ -1092,16 +1181,6 @@ class UserDatabase:
             }
 
     # ==================== Admin Management Methods ====================
-
-    def set_user_banned(self, user_id: int, banned: bool) -> bool:
-        """Ban or unban a user."""
-        with self._lock:
-            with self._get_conn() as conn:
-                conn.execute(
-                    "UPDATE users SET is_banned = ? WHERE id = ?",
-                    (1 if banned else 0, user_id)
-                )
-                return True
 
     def get_public_tokens_with_users(self, status: str = "active") -> List[Dict]:
         """Get public tokens with user information for user page."""

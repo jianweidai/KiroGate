@@ -174,11 +174,21 @@ class KiroAuthManager:
         except Exception as e:
             logger.error(f"Error loading credentials: {e}")
 
-    def _save_credentials_to_file(self) -> None:
+    def _save_credentials_to_file(
+        self,
+        access_token: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+        profile_arn: Optional[str] = None
+    ) -> None:
         """
         Save updated credentials to JSON file.
 
         Updates existing file, preserving other fields.
+
+        Args:
+            access_token: New access token (uses current if None)
+            refresh_token: New refresh token (uses current if None)
+            profile_arn: New profile ARN (uses current if None)
         """
         if not self._creds_file:
             return
@@ -192,12 +202,14 @@ class KiroAuthManager:
                 with open(path, 'r', encoding='utf-8') as f:
                     existing_data = json.load(f)
 
-            # Update data
-            existing_data['accessToken'] = self._access_token
-            existing_data['refreshToken'] = self._refresh_token
+            # Update data with provided values or current values
+            existing_data['accessToken'] = access_token if access_token is not None else self._access_token
+            existing_data['refreshToken'] = refresh_token if refresh_token is not None else self._refresh_token
             if self._expires_at:
                 existing_data['expiresAt'] = self._expires_at.isoformat()
-            if self._profile_arn:
+            if profile_arn is not None:
+                existing_data['profileArn'] = profile_arn
+            elif self._profile_arn:
                 existing_data['profileArn'] = self._profile_arn
 
             # Save
@@ -293,24 +305,25 @@ class KiroAuthManager:
         if not new_access_token:
             raise ValueError(f"Response does not contain accessToken: {data}")
 
-        # Update data
+        # Calculate expiration time with buffer (minus 60 seconds)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        new_expires_at = datetime.fromtimestamp(
+            now.timestamp() + expires_in - 60,
+            tz=timezone.utc
+        )
+
+        # Save to file first (before updating state)
+        self._save_credentials_to_file(new_access_token, new_refresh_token, new_profile_arn)
+
+        # Update all state atomically after all operations succeed
         self._access_token = new_access_token
         if new_refresh_token:
             self._refresh_token = new_refresh_token
         if new_profile_arn:
             self._profile_arn = new_profile_arn
-
-        # Calculate expiration time with buffer (minus 60 seconds)
-        self._expires_at = datetime.now(timezone.utc).replace(microsecond=0)
-        self._expires_at = datetime.fromtimestamp(
-            self._expires_at.timestamp() + expires_in - 60,
-            tz=timezone.utc
-        )
+        self._expires_at = new_expires_at
 
         logger.info(f"Token refreshed, expires: {self._expires_at.isoformat()}")
-
-        # Save to file
-        self._save_credentials_to_file()
 
     async def get_access_token(self) -> str:
         """

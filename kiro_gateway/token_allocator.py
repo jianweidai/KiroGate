@@ -6,6 +6,7 @@ KiroGate 智能 Token 分配器。
 实现基于成功率、新鲜度和负载均衡的 Token 智能分配算法。
 """
 
+import asyncio
 import time
 from typing import Optional, Tuple
 
@@ -25,6 +26,7 @@ class SmartTokenAllocator:
     """智能 Token 分配器。"""
 
     def __init__(self):
+        self._lock = asyncio.Lock()
         self._token_managers: dict[int, KiroAuthManager] = {}
 
     def calculate_score(self, token: DonatedToken) -> float:
@@ -122,23 +124,24 @@ class SmartTokenAllocator:
         return best, manager
 
     async def _get_manager(self, token: DonatedToken) -> KiroAuthManager:
-        """获取或创建 Token 对应的 AuthManager。"""
-        if token.id in self._token_managers:
-            return self._token_managers[token.id]
+        """获取或创建 Token 对应的 AuthManager（线程安全）。"""
+        async with self._lock:
+            if token.id in self._token_managers:
+                return self._token_managers[token.id]
 
-        # 获取解密的 refresh token
-        refresh_token = user_db.get_decrypted_token(token.id)
-        if not refresh_token:
-            raise NoTokenAvailable(f"Failed to decrypt token {token.id}")
+            # 获取解密的 refresh token
+            refresh_token = user_db.get_decrypted_token(token.id)
+            if not refresh_token:
+                raise NoTokenAvailable(f"Failed to decrypt token {token.id}")
 
-        manager = KiroAuthManager(
-            refresh_token=refresh_token,
-            region=settings.region,
-            profile_arn=settings.profile_arn
-        )
+            manager = KiroAuthManager(
+                refresh_token=refresh_token,
+                region=settings.region,
+                profile_arn=settings.profile_arn
+            )
 
-        self._token_managers[token.id] = manager
-        return manager
+            self._token_managers[token.id] = manager
+            return manager
 
     def record_usage(self, token_id: int, success: bool) -> None:
         """记录 Token 使用结果。"""

@@ -201,6 +201,7 @@ class KiroHttpClient:
                 # 403 - Token expired, refresh and retry
                 if response.status_code == 403:
                     logger.warning(f"Received 403, refreshing token (attempt {attempt + 1}/{max_retries})")
+                    await response.aclose()
                     await self.auth_manager.force_refresh()
                     continue
 
@@ -208,6 +209,7 @@ class KiroHttpClient:
                 if response.status_code == 429:
                     delay = settings.base_retry_delay * (2 ** attempt)
                     logger.warning(f"Received 429, waiting {delay}s (attempt {attempt + 1}/{max_retries})")
+                    await response.aclose()
                     await asyncio.sleep(delay)
                     continue
 
@@ -215,6 +217,7 @@ class KiroHttpClient:
                 if 500 <= response.status_code < 600:
                     delay = settings.base_retry_delay * (2 ** attempt)
                     logger.warning(f"Received {response.status_code}, waiting {delay}s (attempt {attempt + 1}/{max_retries})")
+                    await response.aclose()
                     await asyncio.sleep(delay)
                     continue
 

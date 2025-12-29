@@ -48,7 +48,7 @@ from kiro_gateway.streaming import (
     collect_anthropic_response,
 )
 from kiro_gateway.utils import generate_conversation_id, get_kiro_headers
-from kiro_gateway.config import settings, AUTO_CHUNKING_ENABLED
+from kiro_gateway.config import settings, AUTO_CHUNKING_ENABLED, AUTO_CHUNK_THRESHOLD
 from kiro_gateway.metrics import metrics
 
 
@@ -129,6 +129,11 @@ class RequestHandler:
             error_content = await response.aread()
         except Exception:
             error_content = "未知错误".encode("utf-8")
+        finally:
+            try:
+                await response.aclose()
+            except Exception:
+                pass
 
         await http_client.close()
         error_text = error_content.decode('utf-8', errors='replace')

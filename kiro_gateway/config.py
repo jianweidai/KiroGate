@@ -28,7 +28,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -62,8 +62,13 @@ def _get_raw_env_value(var_name: str, env_file: str = ".env") -> Optional[str]:
             match = re.match(pattern, line)
             if match:
                 return match.group(2)
-    except Exception:
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        # File not found or permission issues are expected when env file doesn't exist
         pass
+    except (re.error, ValueError) as e:
+        # Regex or parsing errors - log but don't fail
+        from loguru import logger
+        logger.debug(f"Error parsing env file for {var_name}: {e}")
 
     return None
 
@@ -314,6 +319,39 @@ class Settings(BaseSettings):
         if v not in valid:
             return "lax"
         return v
+
+    @model_validator(mode="after")
+    def validate_security_defaults(self) -> "Settings":
+        """验证安全配置，警告使用默认密钥。"""
+        from loguru import logger
+
+        insecure_defaults = []
+
+        # 检查默认密码
+        if self.admin_password == "admin123":
+            insecure_defaults.append("ADMIN_PASSWORD 使用默认值 'admin123'")
+
+        # 检查默认密钥
+        default_keys = {
+            "admin_secret_key": "kirogate_admin_secret_key_change_me",
+            "user_session_secret": "kirogate_user_secret_change_me",
+            "token_encrypt_key": "kirogate_token_encrypt_key_32b!",
+        }
+
+        for key_name, default_value in default_keys.items():
+            value = getattr(self, key_name)
+            if value == default_value:
+                insecure_defaults.append(f"{key_name.upper()} 使用默认值（不安全）")
+
+        if insecure_defaults:
+            logger.warning("=" * 60)
+            logger.warning("安全警告: 检测到不安全的默认配置！")
+            for issue in insecure_defaults:
+                logger.warning(f"  - {issue}")
+            logger.warning("请在生产环境中修改 .env 文件中的相关配置")
+            logger.warning("=" * 60)
+
+        return self
 
 
 # Global settings instance

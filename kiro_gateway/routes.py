@@ -2175,13 +2175,13 @@ async def api_import_tokens(
         if visibility not in ("public", "private"):
             return JSONResponse(status_code=400, content={"error": "可见性无效"})
 
-    payload, error, status = await _read_import_payload(
-        file=file,
-        file_path=file_path,
-        tokens_text=tokens_text,
-        json_text=json_text,
-        allow_file_path=False
-    )
+        payload, error, status = await _read_import_payload(
+            file=file,
+            file_path=file_path,
+            tokens_text=tokens_text,
+            json_text=json_text,
+            allow_file_path=False
+        )
         if error:
             return JSONResponse(status_code=status or 400, content={"error": error})
 

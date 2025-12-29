@@ -14,7 +14,7 @@ import json
 PROXY_BASE = "https://proxy.jhun.edu.kg"
 
 # SEO and common head
-COMMON_HEAD = f'''
+COMMON_HEAD = r'''
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KiroGate - OpenAI & Anthropic 兼容的 Kiro API 代理网关</title>
@@ -558,7 +558,7 @@ COMMON_HEAD = f'''
   </script>
 '''
 
-COMMON_NAV = f'''
+COMMON_NAV = r'''
   <nav style="background: var(--bg-nav); border-bottom: 1px solid var(--border); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);" class="sticky top-0 z-50">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
       <div class="flex justify-between h-16">
