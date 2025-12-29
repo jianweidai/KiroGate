@@ -57,8 +57,8 @@ services:
       - STATIC_ASSETS_PROXY_BASE=${STATIC_ASSETS_PROXY_BASE:-https://proxy.jhun.edu.kg}
 
     volumes:
-      # 持久化统计数据
-      - ./data:/app/data
+      # 持久化统计数据（使用命名卷，自动处理权限）
+      - kirogate_data:/app/data
       # 如果使用凭证文件，取消下面的注释
       # - ~/.aws/sso/cache/kiro-auth-token.json:/app/credentials.json:ro
       # 然后设置 KIRO_CREDS_FILE=/app/credentials.json
@@ -69,3 +69,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+volumes:
+  kirogate_data:
