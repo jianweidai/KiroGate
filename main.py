@@ -243,11 +243,14 @@ async def lifespan(app: FastAPI):
     has_global_credentials = bool(settings.refresh_token) or bool(settings.kiro_creds_file)
 
     # 创建全局 AuthManager（简单模式使用）
+    # 传递 client_id 和 client_secret 以支持 IDC 认证模式
     auth_manager = KiroAuthManager(
         refresh_token=settings.refresh_token,
         profile_arn=settings.profile_arn,
         region=settings.region,
-        creds_file=settings.kiro_creds_file if settings.kiro_creds_file else None
+        creds_file=settings.kiro_creds_file if settings.kiro_creds_file else None,
+        client_id=settings.client_id if settings.client_id else None,
+        client_secret=settings.client_secret if settings.client_secret else None,
     )
     app.state.auth_manager = auth_manager
 

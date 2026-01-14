@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     # 凭证文件路径（可选，作为 .env 的替代）
     kiro_creds_file: str = Field(default="", alias="KIRO_CREDS_FILE")
 
+    # IDC 模式凭证（AWS Builder ID 登录）
+    # 从 Kiro IDE 凭证文件中获取
+    client_id: str = Field(default="", alias="CLIENT_ID")
+    client_secret: str = Field(default="", alias="CLIENT_SECRET")
+
+
     # ==================================================================================================
     # Token 设置
     # ==================================================================================================

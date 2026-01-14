@@ -109,18 +109,21 @@ class TokenHealthChecker:
         Returns:
             True if token is valid, False otherwise
         """
-        # Get decrypted token
-        refresh_token = user_db.get_decrypted_token(token_id)
-        if not refresh_token:
-            user_db.record_health_check(token_id, False, "Failed to decrypt token")
+        # 获取完整凭证信息（包括 IDC 的 client_id 和 client_secret）
+        credentials = user_db.get_token_credentials(token_id)
+        if not credentials or not credentials.get("refresh_token"):
+            user_db.record_health_check(token_id, False, "Failed to get token credentials")
             return False
 
         # Try to get access token
         try:
+            # 创建 AuthManager，传递完整凭证以支持 IDC 认证模式
             manager = KiroAuthManager(
-                refresh_token=refresh_token,
+                refresh_token=credentials["refresh_token"],
                 region=settings.region,
-                profile_arn=settings.profile_arn
+                profile_arn=settings.profile_arn,
+                client_id=credentials.get("client_id"),
+                client_secret=credentials.get("client_secret"),
             )
             access_token = await manager.get_access_token()
 

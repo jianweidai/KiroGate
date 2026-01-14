@@ -63,7 +63,9 @@ class AuthManagerCache:
         self,
         refresh_token: str,
         region: Optional[str] = None,
-        profile_arn: Optional[str] = None
+        profile_arn: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None
     ) -> KiroAuthManager:
         """
         Get or create AuthManager for given refresh token.
@@ -74,6 +76,8 @@ class AuthManagerCache:
             refresh_token: Kiro refresh token
             region: AWS region (defaults to settings.region)
             profile_arn: AWS profile ARN (defaults to settings.profile_arn)
+            client_id: OAuth client ID (for IDC mode)
+            client_secret: OAuth client secret (for IDC mode)
 
         Returns:
             KiroAuthManager instance for the refresh token
@@ -86,12 +90,14 @@ class AuthManagerCache:
                 logger.debug(f"AuthManager cache hit for token: {self._mask_token(refresh_token)}")
                 return self.cache[refresh_token]
 
-            # Create new AuthManager
+            # Create new AuthManager with IDC support
             logger.info(f"Creating new AuthManager for token: {self._mask_token(refresh_token)}")
             auth_manager = KiroAuthManager(
                 refresh_token=refresh_token,
                 region=region or settings.region,
-                profile_arn=profile_arn or settings.profile_arn
+                profile_arn=profile_arn or settings.profile_arn,
+                client_id=client_id,
+                client_secret=client_secret,
             )
 
             # Add to cache

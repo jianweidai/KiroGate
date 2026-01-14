@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../amq2api"
+		}
+	],
+	"settings": {}
+}

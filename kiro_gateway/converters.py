@@ -45,6 +45,33 @@ from kiro_gateway.models import (
 )
 
 
+# ==================================================================================================
+# Extended Thinking 相关常量
+# ==================================================================================================
+
+# Thinking 提示词 - 用于触发模型的 thinking 模式
+# 结合 XML 控制标签和自然语言指令，强制模型进行深度思考
+THINKING_HINT = """
+<thinking_mode>interleaved</thinking_mode><max_thinking_length>16000</max_thinking_length>
+You MUST think deeply and exhaustively before answering. Use <thinking> tags to show your detailed step-by-step reasoning.
+<thinking_mode>interleaved</thinking_mode><max_thinking_length>16000</max_thinking_length>
+"""
+
+# Thinking System Prompt - 强化思考指令
+THINKING_SYSTEM_PROMPT = """
+You are currently running in 'Extended Thinking Mode'.
+Your responses MUST differ from standard responses in the following way:
+1. You MUST start your response with a <thinking> block.
+2. Inside <thinking> tags, you MUST engage in a detailed, multi-step reasoning process. 
+3. Do not be brief in your thinking. Explore the problem depth, consider edge cases, and correct yourself if necessary.
+4. Only after fully thinking through the problem should you provide the final answer outside the tags.
+"""
+
+# Thinking 标签
+THINKING_START_TAG = "<thinking>"
+THINKING_END_TAG = "</thinking>"
+
+
 def extract_text_content(content: Any) -> str:
     """
     Извлекает текстовый контент из различных форматов.
@@ -426,33 +453,80 @@ def _extract_system_and_tool_docs(
     return system_prompt, non_system_messages, processed_tools
 
 
+def _is_thinking_enabled(thinking_param: Any) -> bool:
+    """
+    检测请求是否启用了 thinking 模式。
+    
+    默认启用 thinking，与 Gemini 和 Custom API 行为一致。
+    
+    Args:
+        thinking_param: thinking 参数值（可以是 None、bool 或 dict）
+    
+    Returns:
+        是否启用 thinking
+        
+    Examples:
+        >>> _is_thinking_enabled(None)
+        True  # 默认启用
+        >>> _is_thinking_enabled(True)
+        True
+        >>> _is_thinking_enabled(False)
+        False
+        >>> _is_thinking_enabled({"type": "enabled", "budget_tokens": 1024})
+        True
+        >>> _is_thinking_enabled({"type": "disabled"})
+        False
+    """
+    if thinking_param is None:
+        return True  # 默认启用
+    
+    if isinstance(thinking_param, bool):
+        return thinking_param
+    
+    if isinstance(thinking_param, dict):
+        # 先检查 enabled 字段（一些 API 可能只使用这个字段）
+        if "enabled" in thinking_param:
+            return bool(thinking_param["enabled"])
+        
+        # 检查 type 字段（Anthropic 官方格式）
+        thinking_type = thinking_param.get("type", "enabled")
+        if thinking_type == "disabled":
+            return False
+        # enabled 或其他值都视为启用
+        return True
+    
+    return True  # 未知类型时默认启用
+
 def build_kiro_payload(
     request_data: ChatCompletionRequest,
     conversation_id: str,
-    profile_arn: str
+    profile_arn: str,
+    thinking_enabled: bool = True
 ) -> dict:
     """
-    Строит полный payload для Kiro API.
+    构建 Kiro API 的完整 payload。
     
-    Включает:
-    - Полную историю сообщений
-    - System prompt (добавляется к первому user сообщению)
-    - Tools definitions (с обработкой длинных descriptions)
-    - Текущее сообщение
+    包括：
+    - 完整的消息历史
+    - System prompt（添加到第一个 user 消息）
+    - Tools 定义（处理长描述）
+    - 当前消息
+    - Extended Thinking 支持（通过 THINKING_HINT 注入）
     
-    Если tools содержат слишком длинные descriptions, они автоматически
-    переносятся в system prompt, а в tool остаётся ссылка на документацию.
+    如果 tools 包含过长的 descriptions，会自动转移到 system prompt，
+    而在 tool 中保留引用。
     
     Args:
-        request_data: Запрос в формате OpenAI
-        conversation_id: Уникальный ID разговора
-        profile_arn: ARN профиля AWS CodeWhisperer
+        request_data: OpenAI 格式的请求
+        conversation_id: 会话唯一 ID
+        profile_arn: AWS CodeWhisperer profile ARN
+        thinking_enabled: 是否启用 Extended Thinking 模式（默认 True）
     
     Returns:
-        Словарь payload для POST запроса к Kiro API
+        Kiro API POST 请求的 payload 字典
     
     Raises:
-        ValueError: Если нет сообщений для отправки
+        ValueError: 如果没有可发送的消息
     """
     messages = list(request_data.messages)
 
@@ -460,6 +534,10 @@ def build_kiro_payload(
     system_prompt, non_system_messages, processed_tools = _extract_system_and_tool_docs(
         messages, request_data.tools
     )
+    
+    # Extended Thinking：在 System Prompt 中注入强制思考指令
+    if thinking_enabled:
+        system_prompt = f"{system_prompt}\n{THINKING_SYSTEM_PROMPT}".strip()
 
     # Объединяем соседние сообщения с одинаковой ролью
     merged_messages = merge_adjacent_messages(non_system_messages)
@@ -500,11 +578,17 @@ def build_kiro_payload(
         })
         current_content = "Continue"
     
-    # Если контент пустой
+    # 如果内容为空
     if not current_content:
         current_content = "Continue"
     
-    # Строим userInputMessage
+    # Extended Thinking：在用户消息末尾注入 THINKING_HINT
+    # 这会触发模型输出 <thinking>...</thinking> 标签
+    if thinking_enabled and current_content:
+        current_content = f"{current_content}\n{THINKING_HINT}"
+        logger.debug("Extended Thinking 已启用，已注入 THINKING_HINT")
+    
+    # 构建 userInputMessage
     user_input_message = {
         "content": current_content,
         "modelId": model_id,

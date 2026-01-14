@@ -2013,9 +2013,8 @@ async def oauth2_callback(request: Request, code: str = None, state: str = None)
     """Handle OAuth2 callback from LinuxDo."""
     from kiro_gateway.user_manager import user_manager
 
-    # Verify state
-    cookie_state = request.cookies.get("oauth_state")
-    if not state or state != cookie_state:
+    # Verify state (use server-side verification instead of cookie)
+    if not state or not user_manager.session.verify_oauth_state(state):
         return HTMLResponse(content="<h1>错误</h1><p>无效的 state 参数</p>", status_code=400)
 
     if not code:
@@ -2094,9 +2093,8 @@ async def github_oauth2_callback(request: Request, code: str = None, state: str 
     """Handle OAuth2 callback from GitHub."""
     from kiro_gateway.user_manager import user_manager
 
-    # Verify state
-    cookie_state = request.cookies.get("github_oauth_state")
-    if not state or state != cookie_state:
+    # Verify state (use server-side verification instead of cookie)
+    if not state or not user_manager.session.verify_oauth_state(state):
         return HTMLResponse(content="<h1>错误</h1><p>无效的 state 参数</p>", status_code=400)
 
     if not code:

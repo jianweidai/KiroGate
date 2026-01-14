@@ -51,6 +51,186 @@ except ImportError:
     debug_logger = None
 
 
+# ==================================================================================================
+# Extended Thinking 相关常量和辅助函数
+# ==================================================================================================
+
+# Thinking 标签
+THINKING_START_TAG = "<thinking>"
+THINKING_END_TAG = "</thinking>"
+
+
+def _pending_tag_suffix(buffer: str, tag: str) -> int:
+    """
+    检测 buffer 末尾是否是 tag 的部分前缀。
+    
+    用于处理跨字节流边界的标签检测。
+    
+    Args:
+        buffer: 当前缓冲区内容
+        tag: 要检测的标签
+    
+    Returns:
+        部分标签的长度（0 表示没有部分标签）
+        
+    Examples:
+        >>> _pending_tag_suffix("hello<thi", "<thinking>")
+        4  # "<thi" 是 "<thinking>" 的前缀
+        >>> _pending_tag_suffix("hello", "<thinking>")
+        0  # 没有部分标签
+    """
+    max_len = min(len(buffer), len(tag) - 1)
+    for length in range(max_len, 0, -1):
+        if buffer[-length:] == tag[:length]:
+            return length
+    return 0
+
+
+class ThinkingStreamHandler:
+    """
+    Extended Thinking 流解析处理器。
+    
+    实时解析 Kiro API 返回的文本流，检测 <thinking> 标签并转换为
+    Anthropic 格式的 thinking content block。
+    
+    使用状态机管理 thinking 块的开始和结束，支持跨 chunk 边界的标签检测。
+    
+    Attributes:
+        in_thinking_block: 是否在 thinking 块中
+        thinking_buffer: 累积待处理的文本
+        pending_start_chars: 待处理的开始标签字符数
+        thinking_enabled: 是否启用 thinking 解析
+    """
+    
+    def __init__(self, thinking_enabled: bool = True):
+        """
+        初始化 ThinkingStreamHandler。
+        
+        Args:
+            thinking_enabled: 是否启用 thinking 解析
+        """
+        self.thinking_enabled = thinking_enabled
+        self.in_thinking_block = False
+        self.thinking_buffer = ""
+        self.pending_start_chars = 0
+    
+    def process_content(self, content: str) -> List[Dict[str, Any]]:
+        """
+        处理接收到的内容，解析 thinking 标签。
+        
+        Args:
+            content: 新接收到的内容片段
+        
+        Returns:
+            事件列表，每个事件包含：
+            - type: "text" 或 "thinking"
+            - content: 内容片段
+            - action: "start"（开始块）、"delta"（内容增量）、"stop"（结束块）
+        """
+        if not self.thinking_enabled:
+            # 未启用 thinking，直接返回文本
+            return [{"type": "text", "content": content, "action": "delta"}]
+        
+        events = []
+        self.thinking_buffer += content
+        
+        while self.thinking_buffer:
+            if not self.in_thinking_block:
+                # 不在 thinking 块中，查找 <thinking> 开始标签
+                events_part = self._process_text_mode()
+                events.extend(events_part)
+            else:
+                # 在 thinking 块中，查找 </thinking> 结束标签
+                events_part = self._process_thinking_mode()
+                events.extend(events_part)
+            
+            # 检查是否需要继续处理
+            if not events_part:
+                break
+        
+        return events
+    
+    def _process_text_mode(self) -> List[Dict[str, Any]]:
+        """处理文本模式，查找 thinking 开始标签。"""
+        events = []
+        
+        think_start = self.thinking_buffer.find(THINKING_START_TAG)
+        
+        if think_start == -1:
+            # 没有找到完整的开始标签
+            pending = _pending_tag_suffix(self.thinking_buffer, THINKING_START_TAG)
+            
+            # 发送非标签部分作为普通文本
+            emit_len = len(self.thinking_buffer) - pending
+            if emit_len > 0:
+                text_chunk = self.thinking_buffer[:emit_len]
+                events.append({"type": "text", "content": text_chunk, "action": "delta"})
+            
+            self.thinking_buffer = self.thinking_buffer[emit_len:]
+        else:
+            # 找到完整的 <thinking> 标签
+            before_text = self.thinking_buffer[:think_start]
+            if before_text:
+                # 发送标签前的文本
+                events.append({"type": "text", "content": before_text, "action": "delta"})
+            
+            # 进入 thinking 模式
+            events.append({"type": "thinking", "content": "", "action": "start"})
+            self.in_thinking_block = True
+            self.thinking_buffer = self.thinking_buffer[think_start + len(THINKING_START_TAG):]
+        
+        return events
+    
+    def _process_thinking_mode(self) -> List[Dict[str, Any]]:
+        """处理 thinking 模式，查找结束标签。"""
+        events = []
+        
+        think_end = self.thinking_buffer.find(THINKING_END_TAG)
+        
+        if think_end == -1:
+            # 没有找到完整的结束标签
+            pending = _pending_tag_suffix(self.thinking_buffer, THINKING_END_TAG)
+            emit_len = len(self.thinking_buffer) - pending
+            
+            if emit_len > 0:
+                thinking_chunk = self.thinking_buffer[:emit_len]
+                events.append({"type": "thinking", "content": thinking_chunk, "action": "delta"})
+            
+            self.thinking_buffer = self.thinking_buffer[emit_len:]
+        else:
+            # 找到完整的 </thinking> 标签
+            thinking_chunk = self.thinking_buffer[:think_end]
+            if thinking_chunk:
+                events.append({"type": "thinking", "content": thinking_chunk, "action": "delta"})
+            
+            # 关闭 thinking 块
+            events.append({"type": "thinking", "content": "", "action": "stop"})
+            self.in_thinking_block = False
+            self.thinking_buffer = self.thinking_buffer[think_end + len(THINKING_END_TAG):]
+        
+        return events
+    
+    def flush(self) -> List[Dict[str, Any]]:
+        """
+        刷新缓冲区中剩余的内容。
+        
+        在流结束时调用，输出所有剩余内容。
+        
+        Returns:
+            剩余内容的事件列表
+        """
+        events = []
+        
+        if self.thinking_buffer:
+            if self.in_thinking_block:
+                events.append({"type": "thinking", "content": self.thinking_buffer, "action": "delta"})
+            else:
+                events.append({"type": "text", "content": self.thinking_buffer, "action": "delta"})
+            self.thinking_buffer = ""
+        
+        return events
+
+
 class FirstTokenTimeoutError(Exception):
     """Exception raised when first token timeout occurs."""
     pass
@@ -753,7 +933,14 @@ async def stream_kiro_to_anthropic(
     content_parts: list[str] = []  # 使用 list 替代字符串拼接，提升性能
     content_block_index = 0
     text_block_started = False
+    thinking_block_started = False  # Extended Thinking: 跟踪 thinking 块状态
     tool_blocks_started = {}  # tool_id -> index
+    
+    # 初始化 ThinkingStreamHandler
+    thinking_handler = ThinkingStreamHandler(thinking_enabled=thinking_enabled)
+    
+    if thinking_enabled:
+        logger.debug("Extended Thinking 已启用，将解析 <thinking> 标签")
 
     # 根据模型自适应调整超时时间
     adaptive_stream_read_timeout = get_adaptive_timeout(model, stream_read_timeout)
@@ -823,35 +1010,117 @@ async def stream_kiro_to_anthropic(
                 if event["type"] == "content":
                     content = event["data"]
                     content_parts.append(content)
-
-                    # Если text block ещё не начат, начинаем его
-                    if not text_block_started:
-                        block_start = {
-                            "type": "content_block_start",
-                            "index": content_block_index,
-                            "content_block": {"type": "text", "text": ""}
-                        }
-                        yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
-                        text_block_started = True
-
-                    # Отправляем text_delta
-                    delta = {
-                        "type": "content_block_delta",
-                        "index": content_block_index,
-                        "delta": {"type": "text_delta", "text": content}
-                    }
-                    yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
-
-                    if debug_logger:
-                        debug_logger.log_modified_chunk(f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n".encode('utf-8'))
+                    
+                    # 使用 ThinkingStreamHandler 处理内容
+                    thinking_events = thinking_handler.process_content(content)
+                    
+                    for te in thinking_events:
+                        if te["type"] == "thinking":
+                            if te["action"] == "start":
+                                # 先关闭当前的 text block（如果有）
+                                if text_block_started:
+                                    block_stop = {
+                                        "type": "content_block_stop",
+                                        "index": content_block_index
+                                    }
+                                    yield f"event: content_block_stop\ndata: {json.dumps(block_stop, ensure_ascii=False)}\n\n"
+                                    content_block_index += 1
+                                    text_block_started = False
+                                
+                                # 开始 thinking block
+                                block_start = {
+                                    "type": "content_block_start",
+                                    "index": content_block_index,
+                                    "content_block": {"type": "thinking", "thinking": ""}
+                                }
+                                yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
+                                thinking_block_started = True
+                                
+                            elif te["action"] == "delta" and te["content"]:
+                                # thinking delta
+                                if thinking_block_started:
+                                    delta = {
+                                        "type": "content_block_delta",
+                                        "index": content_block_index,
+                                        "delta": {"type": "thinking_delta", "thinking": te["content"]}
+                                    }
+                                    yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+                                    
+                            elif te["action"] == "stop":
+                                # 关闭 thinking block
+                                if thinking_block_started:
+                                    block_stop = {
+                                        "type": "content_block_stop",
+                                        "index": content_block_index
+                                    }
+                                    yield f"event: content_block_stop\ndata: {json.dumps(block_stop, ensure_ascii=False)}\n\n"
+                                    content_block_index += 1
+                                    thinking_block_started = False
+                        
+                        elif te["type"] == "text" and te["content"]:
+                            # 普通文本内容
+                            if not text_block_started:
+                                block_start = {
+                                    "type": "content_block_start",
+                                    "index": content_block_index,
+                                    "content_block": {"type": "text", "text": ""}
+                                }
+                                yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
+                                text_block_started = True
+                            
+                            # text_delta
+                            delta = {
+                                "type": "content_block_delta",
+                                "index": content_block_index,
+                                "delta": {"type": "text_delta", "text": te["content"]}
+                            }
+                            yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+                            
+                            if debug_logger:
+                                debug_logger.log_modified_chunk(f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n".encode('utf-8'))
 
                 elif event["type"] == "usage":
                     metering_data = event["data"]
 
                 elif event["type"] == "context_usage":
                     context_usage_percentage = event["data"]
-
-        # Закрываем text block если был открыт
+        
+        # 刷新 thinking handler 中剩余的内容
+        flush_events = thinking_handler.flush()
+        for te in flush_events:
+            if te["type"] == "thinking" and te["content"] and thinking_block_started:
+                delta = {
+                    "type": "content_block_delta",
+                    "index": content_block_index,
+                    "delta": {"type": "thinking_delta", "thinking": te["content"]}
+                }
+                yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+            elif te["type"] == "text" and te["content"]:
+                if not text_block_started:
+                    block_start = {
+                        "type": "content_block_start",
+                        "index": content_block_index,
+                        "content_block": {"type": "text", "text": ""}
+                    }
+                    yield f"event: content_block_start\ndata: {json.dumps(block_start, ensure_ascii=False)}\n\n"
+                    text_block_started = True
+                
+                delta = {
+                    "type": "content_block_delta",
+                    "index": content_block_index,
+                    "delta": {"type": "text_delta", "text": te["content"]}
+                }
+                yield f"event: content_block_delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+        
+        # 关闭所有未关闭的块
+        if thinking_block_started:
+            block_stop = {
+                "type": "content_block_stop",
+                "index": content_block_index
+            }
+            yield f"event: content_block_stop\ndata: {json.dumps(block_stop, ensure_ascii=False)}\n\n"
+            content_block_index += 1
+            
         if text_block_started:
             block_stop = {
                 "type": "content_block_stop",
