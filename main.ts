@@ -2,7 +2,7 @@
  * KiroGate - Deno Single-File Edition
  *
  * OpenAI & Anthropic 兼容的 Kiro API 网关
- * 基于 KiroGate by dext7r
+ * 基于 KiroGate by walden
  *
  * 用法: deno run --allow-net --allow-env --unstable-kv main.ts
  *
@@ -968,9 +968,9 @@ function convertAnthropicToOpenAI(request: AnthropicMessagesRequest): ChatComple
     const systemText = typeof request.system === "string"
       ? request.system
       : (request.system as ContentBlock[])
-          .filter(b => b.type === "text")
-          .map(b => b.text)
-          .join("\n");
+        .filter(b => b.type === "text")
+        .map(b => b.text)
+        .join("\n");
     if (systemText) {
       openaiMessages.push({ role: "system", content: systemText });
     }
@@ -3426,15 +3426,15 @@ let authManager: KiroAuthManager;
 async function main() {
   // 配置验证
   if (!settings.refreshToken && !settings.kiroCredsFile) {
-    console.error("=" .repeat(60));
+    console.error("=".repeat(60));
     console.error("  CONFIGURATION ERROR");
-    console.error("=" .repeat(60));
+    console.error("=".repeat(60));
     console.error("  No Kiro credentials configured!");
     console.error("");
     console.error("  Set one of:");
     console.error("    REFRESH_TOKEN=your_refresh_token");
     console.error("    KIRO_CREDS_FILE=path/to/credentials.json");
-    console.error("=" .repeat(60));
+    console.error("=".repeat(60));
     Deno.exit(1);
   }
 
