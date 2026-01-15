@@ -20,6 +20,44 @@
 
 ---
 
+## 📦 Docker 快速启动
+
+```bash
+docker run -d -p 8000:8000 \
+  -e PROXY_API_KEY="your-password" \
+  -e ADMIN_PASSWORD="your-admin-password" \
+  -e ADMIN_SECRET_KEY="your-random-secret" \
+  -v kirogate_data:/app/data \
+  --name kirogate \
+  ghcr.io/awei84/kirogate:main
+```
+
+> 💡 本项目是 [kiro-openai-gateway](https://github.com/Jwadow/kiro-openai-gateway) 的 **Fork 增强版**，新增了图片支持、用户系统、Admin 后台等功能。
+
+---
+
+## 🆕 本 Fork 的新增功能
+
+相比上游项目，本 Fork 新增/改进了以下功能：
+
+| 功能 | 说明 |
+|------|------|
+| **IDC (Builder ID) 认证** | 🆕 支持 AWS IAM Identity Center 认证方式 (Builder ID) |
+| **WebSearch 工具支持** | 支持 Anthropic 官方的 web_search 工具，通过 Kiro MCP API 实现 |
+| **HTTP/SOCKS5 代理** | 支持配置代理服务器访问 Kiro API |
+| **图片支持** | 支持 OpenAI (`image_url`) 和 Anthropic (`image`) 格式的图片输入 |
+| **历史消息图片压缩** | 历史消息中的图片自动替换为占位符，避免请求体过大 |
+| **Extended Thinking** | 完整支持 Claude 的扩展思考模式 |
+| **Token 管理增强** | Token 管理页面添加账户详情功能 |
+| **Kiro 账户信息查看** | 查看 Kiro 账户余额、使用量、订阅状态等信息 |
+| **Token 刷新防抖** | 防止并发请求导致的 Token 刷新竞争问题 |
+| **安全修复** | 修复 session 伪造、路径遍历等安全漏洞 |
+| **用户系统** | 支持 LinuxDo/GitHub OAuth2 登录、Token 捐献、API Key 生成 |
+| **Admin 管理后台** | 用户管理、Token 池管理、IP 黑名单等 |
+| **Token 统计 API** | `/v1/messages/count_tokens` 估算请求的 Token 数量 |
+
+---
+
 ## ✨ 功能特性
 
 | 功能 | 说明 |
@@ -53,7 +91,7 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/aliom-v/KiroGate.git
+git clone https://github.com/awei84/KiroGate.git
 cd KiroGate
 
 # 安装依赖
@@ -71,36 +109,41 @@ python main.py
 
 ### Docker 部署
 
+#### 方式一：直接拉取镜像（推荐）
+
 ```bash
-# 方式一: 使用预构建镜像（推荐）
 docker run -d -p 8000:8000 \
   -e PROXY_API_KEY="your-password" \
+  -e ADMIN_PASSWORD="your-admin-password" \
+  -e ADMIN_SECRET_KEY="your-random-secret" \
   -v kirogate_data:/app/data \
   --name kirogate \
-  ghcr.io/dext7r/kirogate:main
+  ghcr.io/awei84/kirogate:main
+```
 
-# 方式二: 使用 docker-compose
+#### 方式二：使用 docker-compose
+
+```bash
+git clone https://github.com/awei84/KiroGate.git
+cd KiroGate
 cp .env.example .env
 # 编辑 .env 填写你的凭证
 docker-compose up -d
+```
 
-# 方式三: 本地构建运行
+#### 方式三：本地构建
+
+```bash
+git clone https://github.com/awei84/KiroGate.git
+cd KiroGate
 docker build -t kirogate .
 docker run -d -p 8000:8000 \
   -e PROXY_API_KEY="your-password" \
+  -e ADMIN_PASSWORD="your-admin-password" \
+  -e ADMIN_SECRET_KEY="your-random-secret" \
   -v kirogate_data:/app/data \
   --name kirogate kirogate
-
-# 查看日志
-docker logs -f kirogate
 ```
-
-**镜像标签说明：**
-| 标签 | 说明 |
-|------|------|
-| `ghcr.io/dext7r/kirogate:main` | 最新 main 分支构建 |
-| `ghcr.io/dext7r/kirogate:v1.0.0` | 指定版本（推荐生产使用） |
-| `ghcr.io/dext7r/kirogate:<sha>` | 指定 commit 构建 |
 
 ### Fly.io 部署
 
@@ -272,6 +315,28 @@ STATIC_ASSETS_PROXY_BASE="https://proxy.jhun.edu.kg"
 - ✅ **国外服务器/Fly.io**：设置 `STATIC_ASSETS_PROXY_ENABLED=false`
 - ✅ **自定义代理**：修改 `STATIC_ASSETS_PROXY_BASE` 地址
 
+### HTTP/SOCKS5 代理配置
+
+如果需要通过代理服务器访问 Kiro API，可以配置以下环境变量：
+
+```env
+# 代理服务器 URL（支持 HTTP 和 SOCKS5）
+# HTTP 代理示例
+PROXY_URL="http://127.0.0.1:7890"
+
+# SOCKS5 代理示例
+PROXY_URL="socks5://127.0.0.1:1080"
+
+# 代理认证（可选）
+PROXY_USERNAME="your_username"
+PROXY_PASSWORD="your_password"
+```
+
+**注意事项：**
+- 代理配置对所有 Kiro API 请求生效
+- SOCKS5 代理需要安装 `httpx[socks]` 依赖：`pip install httpx[socks]`
+- 代理认证信息会自动嵌入到代理 URL 中
+
 ### 获取 Refresh Token
 
 #### 推荐方式：使用 Kiro Account Manager ✨
@@ -296,6 +361,7 @@ STATIC_ASSETS_PROXY_BASE="https://proxy.jhun.edu.kg"
 | `/v1/models` | GET | 获取可用模型列表 |
 | `/v1/chat/completions` | POST | OpenAI 兼容的聊天补全 |
 | `/v1/messages` | POST | Anthropic 兼容的消息 API |
+| `/v1/messages/count_tokens` | POST | 估算请求的 Token 数量 |
 
 ### 认证方式
 

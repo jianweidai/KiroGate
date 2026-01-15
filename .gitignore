@@ -2,6 +2,12 @@
 .env
 .env.local
 
+# Python Virtual Environment
+venv/
+.venv/
+env/
+.python-version
+
 # IDE
 .vscode/
 .idea/
@@ -32,3 +38,6 @@ htmlcov/
 
 # Data files
 data/
+
+# Excluded docs
+docs/excdoc/

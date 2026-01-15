@@ -28,7 +28,8 @@ OpenAI <-> Kiro 格式转换器。
 """
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+import uuid
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from loguru import logger
 
@@ -45,21 +46,121 @@ from kiro_gateway.models import (
 )
 
 
+# ==================================================================================================
+# Thinking Mode 支持
+# ==================================================================================================
+
+# 默认最大思考长度
+DEFAULT_MAX_THINKING_LENGTH = 200000
+
+
+def is_thinking_enabled(thinking_config: Optional[Union[Dict[str, Any], bool, str]]) -> bool:
+    """
+    检测 thinking 是否启用。
+
+    支持多种格式：
+    - None: 未启用
+    - bool: True/False
+    - str: "enabled"
+    - dict: {"type": "enabled", "budget_tokens": 10000}
+
+    Args:
+        thinking_config: thinking 配置
+
+    Returns:
+        是否启用 thinking
+    """
+    if thinking_config is None:
+        return False
+    if isinstance(thinking_config, bool):
+        return thinking_config
+    if isinstance(thinking_config, str):
+        return thinking_config.lower() == "enabled"
+    if isinstance(thinking_config, dict):
+        type_val = str(thinking_config.get("type", "")).lower()
+        if type_val == "enabled":
+            return True
+        budget = thinking_config.get("budget_tokens")
+        if isinstance(budget, (int, float)) and budget > 0:
+            return True
+    return False
+
+
+def get_thinking_budget(thinking_config: Optional[Union[Dict[str, Any], bool, str]]) -> int:
+    """
+    获取 thinking 的 token 预算。
+
+    Args:
+        thinking_config: thinking 配置
+
+    Returns:
+        token 预算，默认为 DEFAULT_MAX_THINKING_LENGTH
+    """
+    if isinstance(thinking_config, dict):
+        budget = thinking_config.get("budget_tokens")
+        if isinstance(budget, (int, float)) and budget > 0:
+            return int(budget)
+    return DEFAULT_MAX_THINKING_LENGTH
+
+
+def generate_thinking_hint(thinking_config: Optional[Union[Dict[str, Any], bool, str]]) -> str:
+    """
+    生成 thinking 模式的提示标签。
+
+    Args:
+        thinking_config: thinking 配置
+
+    Returns:
+        thinking 提示标签字符串
+    """
+    budget = get_thinking_budget(thinking_config)
+    return f"<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>{budget}</max_thinking_length>"
+
+
+def inject_thinking_hint(system_prompt: str, thinking_config: Optional[Union[Dict[str, Any], bool, str]]) -> str:
+    """
+    将 thinking 提示注入到 system prompt 中。
+
+    如果 system prompt 已经包含 thinking 标签，则不重复注入。
+
+    Args:
+        system_prompt: 原始 system prompt
+        thinking_config: thinking 配置
+
+    Returns:
+        注入后的 system prompt
+    """
+    if not is_thinking_enabled(thinking_config):
+        return system_prompt
+
+    # 检查是否已经包含 thinking 标签
+    if "<thinking_mode>" in system_prompt or "<max_thinking_length>" in system_prompt:
+        return system_prompt
+
+    thinking_hint = generate_thinking_hint(thinking_config)
+
+    if not system_prompt:
+        return thinking_hint
+
+    # 将 thinking hint 添加到 system prompt 开头
+    return f"{thinking_hint}\n\n{system_prompt}"
+
+
 def extract_text_content(content: Any) -> str:
     """
     Извлекает текстовый контент из различных форматов.
-    
+
     OpenAI API поддерживает несколько форматов content:
     - Строка: "Hello, world!"
     - Список: [{"type": "text", "text": "Hello"}]
     - None: пустое сообщение
-    
+
     Args:
         content: Контент в любом поддерживаемом формате
-    
+
     Returns:
         Извлечённый текст или пустая строка
-    
+
     Example:
         >>> extract_text_content("Hello")
         'Hello'
@@ -84,6 +185,88 @@ def extract_text_content(content: Any) -> str:
                 text_parts.append(item)
         return "".join(text_parts)
     return str(content)
+
+
+def extract_images_from_content(content: Any) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    从消息内容中提取图片。
+
+    支持 OpenAI 和 Anthropic 格式的图片：
+    - OpenAI: {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+    - Anthropic: {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
+
+    Args:
+        content: 消息内容（可以是字符串、列表或 None）
+
+    Returns:
+        Tuple[List[Dict], int]: (Kiro 格式的图片列表, 图片数量)
+        Kiro 格式: {"format": "png", "source": {"bytes": "base64数据"}}
+    """
+    if content is None or isinstance(content, str):
+        return [], 0
+
+    if not isinstance(content, list):
+        return [], 0
+
+    images = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+
+        item_type = item.get("type")
+
+        # OpenAI 格式: {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+        if item_type == "image_url":
+            image_url = item.get("image_url", {})
+            url = image_url.get("url", "")
+
+            # 解析 data URL
+            if url.startswith("data:"):
+                # 格式: data:image/png;base64,xxxxx
+                try:
+                    header, data = url.split(",", 1)
+                    # 提取 media_type，例如 "image/png"
+                    media_type = header.split(":")[1].split(";")[0]
+                    # 提取格式，例如 "png"
+                    img_format = media_type.split("/")[1] if "/" in media_type else "png"
+
+                    images.append({
+                        "format": img_format,
+                        "source": {
+                            "bytes": data
+                        }
+                    })
+                    logger.debug(f"Extracted OpenAI image: format={img_format}")
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Failed to parse OpenAI image URL: {e}")
+            else:
+                # 外部 URL - 目前不支持，记录警告
+                logger.warning(f"External image URLs are not supported: {url[:50]}...")
+
+        # Anthropic 格式: {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}
+        elif item_type == "image":
+            source = item.get("source", {})
+            source_type = source.get("type")
+
+            if source_type == "base64":
+                media_type = source.get("media_type", "image/png")
+                data = source.get("data", "")
+
+                # 提取格式
+                img_format = media_type.split("/")[1] if "/" in media_type else "png"
+
+                images.append({
+                    "format": img_format,
+                    "source": {
+                        "bytes": data
+                    }
+                })
+                logger.debug(f"Extracted Anthropic image: format={img_format}")
+            elif source_type == "url":
+                # URL 类型 - 目前不支持
+                logger.warning(f"Image URLs are not supported: {source.get('url', '')[:50]}...")
+
+    return images, len(images)
 
 
 def merge_adjacent_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
@@ -193,17 +376,20 @@ def merge_adjacent_messages(messages: List[ChatMessage]) -> List[ChatMessage]:
 def build_kiro_history(messages: List[ChatMessage], model_id: str) -> List[Dict[str, Any]]:
     """
     Строит массив history для Kiro API из OpenAI messages.
-    
+
     Kiro API ожидает чередование userInputMessage и assistantResponseMessage.
     Эта функция преобразует OpenAI формат в Kiro формат.
-    
+
+    注意：历史消息中的图片会被替换为占位符，以避免请求体过大。
+    只有当前消息（最后一条）的图片会被保留。
+
     Args:
         messages: Список сообщений в формате OpenAI
         model_id: Внутренний ID модели Kiro
-    
+
     Returns:
         Список словарей для поля history в Kiro API
-    
+
     Example:
         >>> msgs = [ChatMessage(role="user", content="Hello")]
         >>> history = build_kiro_history(msgs, "claude-sonnet-4")
@@ -211,40 +397,48 @@ def build_kiro_history(messages: List[ChatMessage], model_id: str) -> List[Dict[
         'Hello'
     """
     history = []
-    
+
     for msg in messages:
         if msg.role == "user":
+            # 提取文本内容
             content = extract_text_content(msg.content)
-            
+
+            # 检查历史消息中是否有图片，用占位符替代
+            _, image_count = extract_images_from_content(msg.content)
+            if image_count > 0:
+                image_placeholder = f"\n[此消息包含 {image_count} 张图片，已在历史记录中省略]"
+                content = content + image_placeholder if content else image_placeholder
+                logger.debug(f"Replaced {image_count} image(s) with placeholder in history message")
+
             user_input = {
                 "content": content,
                 "modelId": model_id,
                 "origin": "AI_EDITOR",
             }
-            
+
             # Обработка tool_results (ответы на tool calls)
             tool_results = _extract_tool_results(msg.content)
             if tool_results:
                 user_input["userInputMessageContext"] = {"toolResults": tool_results}
-            
+
             history.append({"userInputMessage": user_input})
-            
+
         elif msg.role == "assistant":
             content = extract_text_content(msg.content)
-            
+
             assistant_response = {"content": content}
-            
+
             # Обработка tool_calls
             tool_uses = _extract_tool_uses(msg)
             if tool_uses:
                 assistant_response["toolUses"] = tool_uses
-            
+
             history.append({"assistantResponseMessage": assistant_response})
-            
+
         elif msg.role == "system":
             # System prompt обрабатывается отдельно в build_kiro_payload
             pass
-    
+
     return history
 
 
@@ -429,28 +623,31 @@ def _extract_system_and_tool_docs(
 def build_kiro_payload(
     request_data: ChatCompletionRequest,
     conversation_id: str,
-    profile_arn: str
+    profile_arn: str,
+    thinking_config: Optional[Union[Dict[str, Any], bool, str]] = None
 ) -> dict:
     """
     Строит полный payload для Kiro API.
-    
+
     Включает:
     - Полную историю сообщений
     - System prompt (добавляется к первому user сообщению)
     - Tools definitions (с обработкой длинных descriptions)
     - Текущее сообщение
-    
+    - Thinking mode 标签（如果启用）
+
     Если tools содержат слишком длинные descriptions, они автоматически
     переносятся в system prompt, а в tool остаётся ссылка на документацию.
-    
+
     Args:
         request_data: Запрос в формате OpenAI
         conversation_id: Уникальный ID разговора
         profile_arn: ARN профиля AWS CodeWhisperer
-    
+        thinking_config: Thinking 模式配置（可选）
+
     Returns:
         Словарь payload для POST запроса к Kiro API
-    
+
     Raises:
         ValueError: Если нет сообщений для отправки
     """
@@ -460,6 +657,9 @@ def build_kiro_payload(
     system_prompt, non_system_messages, processed_tools = _extract_system_and_tool_docs(
         messages, request_data.tools
     )
+
+    # 注入 thinking 标签到 system prompt（如果启用）
+    system_prompt = inject_thinking_hint(system_prompt, thinking_config)
 
     # Объединяем соседние сообщения с одинаковой ролью
     merged_messages = merge_adjacent_messages(non_system_messages)
@@ -510,7 +710,14 @@ def build_kiro_payload(
         "modelId": model_id,
         "origin": "AI_EDITOR",
     }
-    
+
+    # 提取当前消息中的图片（仅当当前消息是 user 消息时）
+    if current_message.role == "user":
+        images, image_count = extract_images_from_content(current_message.content)
+        if images:
+            user_input_message["images"] = images
+            logger.info(f"Added {image_count} image(s) to current message")
+
     # Добавляем tools и tool_results если есть
     # Используем обработанные tools (с короткими descriptions)
     user_input_context = _build_user_input_context(request_data, current_message, processed_tools)
@@ -520,6 +727,8 @@ def build_kiro_payload(
     # Собираем финальный payload
     payload = {
         "conversationState": {
+            "agentContinuationId": str(uuid.uuid4()),
+            "agentTaskType": "vibe",
             "chatTriggerType": "MANUAL",
             "conversationId": conversation_id,
             "currentMessage": {
@@ -648,8 +857,8 @@ def _extract_anthropic_system_prompt(system: Optional[Any]) -> str:
 
 def _convert_anthropic_content_to_openai(
     content: Any,
-    role: str
-) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]], Optional[str]]:
+    _role: str  # noqa: ARG001 - 保留参数以备将来使用
+) -> Tuple[Optional[Union[str, List[Dict[str, Any]]]], Optional[List[Dict[str, Any]]], Optional[str]]:
     """
     Преобразует Anthropic content в формат OpenAI.
 
@@ -658,7 +867,8 @@ def _convert_anthropic_content_to_openai(
         role: Роль сообщения (user или assistant)
 
     Returns:
-        Tuple из (text_content, tool_calls, tool_call_id)
+        Tuple из (text_content_or_content_list, tool_calls, tool_call_id)
+        如果内容包含图片，返回原始内容列表以保留图片数据
     """
     if isinstance(content, str):
         return content, None, None
@@ -669,6 +879,8 @@ def _convert_anthropic_content_to_openai(
     text_parts = []
     tool_calls = []
     tool_results = []
+    has_images = False
+    content_blocks = []  # 保留原始内容块（用于图片）
 
     for block in content:
         if isinstance(block, dict):
@@ -676,15 +888,13 @@ def _convert_anthropic_content_to_openai(
 
             if block_type == "text":
                 text_parts.append(block.get("text", ""))
+                content_blocks.append(block)
 
             elif block_type == "image":
-                # Image content - для Kiro нужно будет обработать отдельно
-                # Пока добавляем placeholder
-                source = block.get("source", {})
-                if source.get("type") == "base64":
-                    text_parts.append(f"[Image: {source.get('media_type', 'image')}]")
-                elif source.get("type") == "url":
-                    text_parts.append(f"[Image URL: {source.get('url', '')}]")
+                # 保留图片数据，不转换为占位符
+                has_images = True
+                content_blocks.append(block)
+                logger.debug(f"Preserving Anthropic image block")
 
             elif block_type == "tool_use":
                 # Assistant's tool call
@@ -713,11 +923,20 @@ def _convert_anthropic_content_to_openai(
                 thinking_text = block.get("thinking", "")
                 if thinking_text:
                     text_parts.append(f"<thinking>{thinking_text}</thinking>")
+                    content_blocks.append({"type": "text", "text": f"<thinking>{thinking_text}</thinking>"})
 
         elif isinstance(block, AnthropicContentBlock):
             # Pydantic model
             if block.type == "text":
                 text_parts.append(block.text or "")
+                content_blocks.append({"type": "text", "text": block.text or ""})
+            elif block.type == "image":
+                # 保留图片数据
+                has_images = True
+                content_blocks.append({
+                    "type": "image",
+                    "source": block.source
+                })
             elif block.type == "tool_use":
                 tool_call = {
                     "id": block.id or "",
@@ -737,12 +956,23 @@ def _convert_anthropic_content_to_openai(
                 }
                 tool_results.append(tool_result)
 
-    text_content = "\n".join(text_parts) if text_parts else None
-
-    # Если есть tool_results, возвращаем их как content (для обработки в merge_adjacent_messages)
+    # 如果有 tool_results，需要同时保留文本内容
+    # 修复：即使有工具结果也不丢弃用户文本
     if tool_results:
+        # 如果同时有文本内容，将文本和 tool_results 合并
+        if text_parts:
+            text_content = "\n".join(text_parts)
+            # 创建包含文本和 tool_results 的混合内容
+            combined_content = [{"type": "text", "text": text_content}]
+            combined_content.extend(tool_results)
+            return combined_content, None, None
         return tool_results, None, None
 
+    # 如果有图片，返回原始内容块列表以保留图片数据
+    if has_images:
+        return content_blocks, tool_calls if tool_calls else None, None
+
+    text_content = "\n".join(text_parts) if text_parts else None
     return text_content, tool_calls if tool_calls else None, None
 
 
@@ -796,8 +1026,10 @@ def convert_anthropic_messages_to_openai(
         role = msg.role
         content, tool_calls, _ = _convert_anthropic_content_to_openai(msg.content, role)
 
-        # Если content - это tool_results, создаем user сообщение с ними
-        if isinstance(content, list) and content and isinstance(content[0], dict) and content[0].get("type") == "tool_result":
+        # Если content содержит tool_results, создаем user сообщение с ними
+        if isinstance(content, list) and content and any(
+            isinstance(c, dict) and c.get("type") == "tool_result" for c in content
+        ):
             openai_messages.append(ChatMessage(
                 role="user",
                 content=content

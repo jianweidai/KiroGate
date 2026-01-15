@@ -29,7 +29,7 @@ Manages access token lifecycle:
 
 import asyncio
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -50,11 +50,11 @@ from kiro_gateway.utils import get_machine_fingerprint
 class AuthType(Enum):
     """
     认证类型枚举。
-    
+
     SOCIAL: Kiro IDE 社交账号登录 (Google/GitHub等)
         - 端点: https://prod.{region}.auth.desktop.kiro.dev/refreshToken
         - 请求: {"refreshToken": "..."}
-    
+
     IDC: AWS IAM Identity Center (Builder ID)
         - 端点: https://oidc.{region}.amazonaws.com/token
         - 请求: grant_type=refresh_token&client_id=...&client_secret=...&refresh_token=...
@@ -89,7 +89,7 @@ class KiroAuthManager:
         ...     region="us-east-1"
         ... )
         >>> token = await auth_manager.get_access_token()
-        
+
         >>> # IDC 登录 (AWS Builder ID)
         >>> auth_manager = KiroAuthManager(
         ...     refresh_token="your_refresh_token",
@@ -124,7 +124,7 @@ class KiroAuthManager:
         self._profile_arn = profile_arn
         self._region = region
         self._creds_file = creds_file
-        
+
         # IDC (AWS SSO OIDC) 特有字段
         self._client_id: Optional[str] = client_id
         self._client_secret: Optional[str] = client_secret
@@ -140,7 +140,7 @@ class KiroAuthManager:
         self._access_token: Optional[str] = None
         self._expires_at: Optional[datetime] = None
         self._lock = asyncio.Lock()
-        
+
         # 认证类型，加载凭证后确定
         self._auth_type: AuthType = AuthType.SOCIAL
 
@@ -155,14 +155,14 @@ class KiroAuthManager:
         # Load credentials from file if specified
         if creds_file:
             self._load_credentials_from_file(creds_file)
-        
+
         # 根据凭证确定认证类型
         self._detect_auth_type()
-    
+
     def _detect_auth_type(self) -> None:
         """
         根据凭证检测认证类型。
-        
+
         如果有 client_id 和 client_secret，则为 IDC 模式。
         否则为 Social 模式。
         """
@@ -224,7 +224,7 @@ class KiroAuthManager:
                 self._refresh_url = get_kiro_refresh_url(self._region)
                 self._api_host = get_kiro_api_host(self._region)
                 self._q_host = get_kiro_q_host(self._region)
-            
+
             # IDC (AWS SSO OIDC) 特有字段
             if 'clientId' in data:
                 self._client_id = data['clientId']
@@ -328,11 +328,11 @@ class KiroAuthManager:
             await self._refresh_token_idc()
         else:
             await self._refresh_token_social()
-    
+
     async def _refresh_token_social(self) -> None:
         """
         使用 Social (Kiro Desktop Auth) 端点刷新 Token。
-        
+
         端点: https://prod.{region}.auth.desktop.kiro.dev/refreshToken
         方法: POST
         Content-Type: application/json
@@ -351,16 +351,16 @@ class KiroAuthManager:
 
         data = await self._execute_refresh_request(self._refresh_url, json_data=payload, headers=headers)
         self._process_refresh_response(data)
-    
+
     async def _refresh_token_idc(self) -> None:
         """
         使用 IDC (AWS SSO OIDC) 端点刷新 Token。
-        
+
         端点: https://oidc.{region}.amazonaws.com/token
         方法: POST
         Content-Type: application/json
         请求体: {"clientId": "...", "clientSecret": "...", "grantType": "refresh_token", "refreshToken": "..."}
-        
+
         注意: AWS SSO OIDC 使用 JSON 格式和 camelCase 字段名
         """
         if not self._refresh_token:
@@ -380,14 +380,14 @@ class KiroAuthManager:
             "grantType": "refresh_token",
             "refreshToken": self._refresh_token,
         }
-        
+
         headers = {
             "Content-Type": "application/json",
         }
 
         data = await self._execute_refresh_request(url, json_data=json_data, headers=headers)
         self._process_refresh_response(data)
-    
+
     async def _execute_refresh_request(
         self,
         url: str,
@@ -397,13 +397,13 @@ class KiroAuthManager:
     ) -> dict:
         """
         执行刷新请求，带指数退避重试。
-        
+
         Args:
             url: 请求 URL
             json_data: JSON 请求体 (用于 Social 模式)
             form_data: Form 请求体 (用于 IDC 模式)
             headers: 请求头
-        
+
         Returns:
             响应 JSON 数据
         """
@@ -439,14 +439,14 @@ class KiroAuthManager:
                     f"{type(e).__name__}, {delay}s 后重试"
                 )
                 await asyncio.sleep(delay)
-        
+
         logger.error(f"Token 刷新在 {max_retries} 次尝试后失败")
         raise last_error
-    
+
     def _process_refresh_response(self, data: dict) -> None:
         """
         处理刷新响应，更新内部状态。
-        
+
         Args:
             data: 响应 JSON 数据
         """
@@ -537,7 +537,7 @@ class KiroAuthManager:
     def fingerprint(self) -> str:
         """Unique machine fingerprint."""
         return self._fingerprint
-    
+
     @property
     def auth_type(self) -> AuthType:
         """Authentication type (SOCIAL or IDC)."""

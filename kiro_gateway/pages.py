@@ -2379,12 +2379,18 @@ def render_admin_page() -> str:
         <div class="flex flex-wrap justify-between items-center gap-4 mb-4 toolbar">
           <h2 class="text-lg font-semibold">👥 注册用户管理</h2>
           <div class="flex items-center gap-2">
-            <input type="text" id="usersSearch" placeholder="搜索用户名..." oninput="filterUsers()"
+            <input type="text" id="usersSearch" placeholder="搜索用户名/邮箱..." oninput="filterUsers()"
               class="px-3 py-2 rounded-lg text-sm w-40" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
             <select id="usersStatusFilter" onchange="filterUsers()" class="px-3 py-2 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
               <option value="">全部状态</option>
               <option value="false">正常</option>
               <option value="true">已封禁</option>
+            </select>
+            <select id="usersApprovalFilter" onchange="filterUsers()" class="px-3 py-2 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+              <option value="">全部审核</option>
+              <option value="pending">待审核</option>
+              <option value="approved">已通过</option>
+              <option value="rejected">已拒绝</option>
             </select>
             <input type="number" id="usersTrustLevel" min="0" placeholder="信任等级" oninput="filterUsers()"
               class="px-3 py-2 rounded-lg text-sm w-28" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
@@ -2395,6 +2401,8 @@ def render_admin_page() -> str:
             </select>
             <button onclick="batchBanUsers()" id="batchBanUsersBtn" class="btn btn-danger text-sm">批量封禁</button>
             <button onclick="batchUnbanUsers()" id="batchUnbanUsersBtn" class="btn btn-success text-sm">批量解禁</button>
+            <button onclick="batchApproveUsers()" id="batchApproveUsersBtn" class="btn btn-success text-sm">批量通过</button>
+            <button onclick="batchRejectUsers()" id="batchRejectUsersBtn" class="btn btn-danger text-sm">批量拒绝</button>
             <button onclick="refreshUsers()" class="btn btn-primary text-sm">刷新</button>
           </div>
         </div>
@@ -2407,16 +2415,18 @@ def render_admin_page() -> str:
                 </th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortUsers('id')">ID ↕</th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortUsers('username')">用户名 ↕</th>
+                <th class="text-left py-3 px-3">邮箱</th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortUsers('trust_level')">信任等级 ↕</th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortUsers('token_count')">Token 数 ↕</th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortUsers('api_key_count')">API Key ↕</th>
+                <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortUsers('approval_status')">审核 ↕</th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortUsers('is_banned')">状态 ↕</th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortUsers('created_at')">注册时间 ↕</th>
                 <th class="text-left py-3 px-3">操作</th>
               </tr>
             </thead>
             <tbody id="usersTable">
-              <tr><td colspan="9" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+              <tr><td colspan="11" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
             </tbody>
           </table>
         </div>
@@ -2702,6 +2712,16 @@ def render_admin_page() -> str:
             </div>
             <label class="switch">
               <input type="checkbox" id="selfUseToggle" onchange="toggleSelfUse(this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="flex items-center justify-between p-4 rounded-lg mt-4" style="background: var(--bg-input);">
+            <div>
+              <div class="font-medium">注册审核</div>
+              <div class="text-sm" style="color: var(--text-muted);">开启后新注册用户需审核通过</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="approvalToggle" onchange="toggleApproval(this.checked)">
               <span class="slider"></span>
             </label>
           </div>
@@ -3134,6 +3154,8 @@ def render_admin_page() -> str:
         document.getElementById('siteToggle').checked = siteEnabled;
         const selfUseToggle = document.getElementById('selfUseToggle');
         if (selfUseToggle) selfUseToggle.checked = !!d.self_use_enabled;
+        const approvalToggle = document.getElementById('approvalToggle');
+        if (approvalToggle) approvalToggle.checked = !!d.require_approval;
         // Token status
         document.getElementById('tokenStatus').innerHTML = d.token_valid ? '<span class="text-green-400">有效</span>' : '<span class="text-yellow-400">未知</span>';
         document.getElementById('totalRequests').textContent = d.total_requests || 0;
@@ -3498,6 +3520,13 @@ def render_admin_page() -> str:
       refreshStats();
     }}
 
+    async function toggleApproval(enabled) {{
+      const fd = new FormData();
+      fd.append('enabled', enabled);
+      await fetch('/admin/api/toggle-approval', {{ method: 'POST', body: fd }});
+      refreshStats();
+    }}
+
     async function refreshToken() {{
       const r = await fetch('/admin/api/refresh-token', {{ method: 'POST' }});
       const d = await r.json();
@@ -3696,6 +3725,7 @@ def render_admin_page() -> str:
         const pageSize = parseInt(document.getElementById('usersPageSize').value);
         const search = document.getElementById('usersSearch').value.trim();
         const statusValue = document.getElementById('usersStatusFilter')?.value ?? '';
+        const approvalValue = document.getElementById('usersApprovalFilter')?.value ?? '';
         const trustLevelRaw = document.getElementById('usersTrustLevel')?.value ?? '';
         const trustLevel = trustLevelRaw === '' ? undefined : parseInt(trustLevelRaw, 10);
         const d = await fetchJson('/admin/api/users' + buildQuery({{
@@ -3703,6 +3733,7 @@ def render_admin_page() -> str:
           page_size: pageSize,
           search,
           is_banned: statusValue === '' ? undefined : statusValue,
+          approval_status: approvalValue === '' ? undefined : approvalValue,
           trust_level: Number.isFinite(trustLevel) ? trustLevel : undefined,
           sort_field: usersSortField,
           sort_order: usersSortAsc ? 'asc' : 'desc'
@@ -3752,6 +3783,21 @@ def render_admin_page() -> str:
       }}
       tb.innerHTML = users.map(u => {{
         const username = escapeHtml(u.username || '-');
+        const email = escapeHtml(u.email || '-');
+        const approval = u.approval_status || 'approved';
+        const approvalBadge = approval === 'approved'
+          ? '<span class="text-green-400">已通过</span>'
+          : approval === 'pending'
+            ? '<span class="text-yellow-400">待审核</span>'
+            : '<span class="text-red-400">已拒绝</span>';
+        const approvalActions = [
+          approval !== 'approved'
+            ? `<button onclick="approveUser(${{u.id}})" class="text-xs px-2 py-1 rounded bg-green-500/20 text-green-400 hover:bg-green-500/30">通过</button>`
+            : '',
+          approval !== 'rejected'
+            ? `<button onclick="rejectUser(${{u.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30">拒绝</button>`
+            : ''
+        ].filter(Boolean).join('');
         return `
         <tr class="table-row">
           <td class="py-3 px-3">
@@ -3759,9 +3805,11 @@ def render_admin_page() -> str:
           </td>
           <td class="py-3 px-3">${{u.id}}</td>
           <td class="py-3 px-3 font-medium">${{username}}</td>
+          <td class="py-3 px-3">${{email}}</td>
           <td class="py-3 px-3">Lv.${{u.trust_level}}</td>
           <td class="py-3 px-3">${{u.token_count}}</td>
           <td class="py-3 px-3">${{u.api_key_count}}</td>
+          <td class="py-3 px-3">${{approvalBadge}}</td>
           <td class="py-3 px-3">${{u.is_banned ? '<span class="text-red-400">已封禁</span>' : '<span class="text-green-400">正常</span>'}}</td>
           <td class="py-3 px-3">${{u.created_at ? new Date(u.created_at).toLocaleString() : '-'}}</td>
           <td class="py-3 px-3">
@@ -3769,6 +3817,7 @@ def render_admin_page() -> str:
               ? `<button onclick="unbanUser(${{u.id}})" class="text-xs px-2 py-1 rounded bg-green-500/20 text-green-400 hover:bg-green-500/30">解封</button>`
               : `<button onclick="banUser(${{u.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30">封禁</button>`
             }}
+            ${{approvalActions}}
           </td>
         </tr>
       `;
@@ -3823,6 +3872,22 @@ def render_admin_page() -> str:
       refreshUsers();
     }}
 
+    async function approveUser(userId) {{
+      if (!confirm('确定要通过此用户吗？')) return;
+      const fd = new FormData();
+      fd.append('user_id', userId);
+      await fetch('/admin/api/users/approve', {{ method: 'POST', body: fd }});
+      refreshUsers();
+    }}
+
+    async function rejectUser(userId) {{
+      if (!confirm('确定要拒绝此用户吗？')) return;
+      const fd = new FormData();
+      fd.append('user_id', userId);
+      await fetch('/admin/api/users/reject', {{ method: 'POST', body: fd }});
+      refreshUsers();
+    }}
+
     function toggleSelectAllUsers(checked) {{
       const checkboxes = document.querySelectorAll('#usersTable input[type="checkbox"]');
       checkboxes.forEach(cb => {{
@@ -3845,9 +3910,13 @@ def render_admin_page() -> str:
     function updateBatchUserButtons() {{
       const banBtn = document.getElementById('batchBanUsersBtn');
       const unbanBtn = document.getElementById('batchUnbanUsersBtn');
+      const approveBtn = document.getElementById('batchApproveUsersBtn');
+      const rejectBtn = document.getElementById('batchRejectUsersBtn');
       const hasSelection = selectedUsers.size > 0;
       if (banBtn) banBtn.disabled = !hasSelection;
       if (unbanBtn) unbanBtn.disabled = !hasSelection;
+      if (approveBtn) approveBtn.disabled = !hasSelection;
+      if (rejectBtn) rejectBtn.disabled = !hasSelection;
     }}
 
     async function batchBanUsers() {{
@@ -3876,6 +3945,38 @@ def render_admin_page() -> str:
         const fd = new FormData();
         fd.append('user_id', userId);
         return fetch('/admin/api/users/unban', {{ method: 'POST', body: fd }});
+      }});
+      await Promise.all(promises);
+      selectedUsers.clear();
+      refreshUsers();
+    }}
+
+    async function batchApproveUsers() {{
+      if (selectedUsers.size === 0) {{
+        alert('请先选择要通过的用户');
+        return;
+      }}
+      if (!confirm(`确定要通过选中的 ${{selectedUsers.size}} 个用户吗？`)) return;
+      const promises = Array.from(selectedUsers).map(userId => {{
+        const fd = new FormData();
+        fd.append('user_id', userId);
+        return fetch('/admin/api/users/approve', {{ method: 'POST', body: fd }});
+      }});
+      await Promise.all(promises);
+      selectedUsers.clear();
+      refreshUsers();
+    }}
+
+    async function batchRejectUsers() {{
+      if (selectedUsers.size === 0) {{
+        alert('请先选择要拒绝的用户');
+        return;
+      }}
+      if (!confirm(`确定要拒绝选中的 ${{selectedUsers.size}} 个用户吗？`)) return;
+      const promises = Array.from(selectedUsers).map(userId => {{
+        const fd = new FormData();
+        fd.append('user_id', userId);
+        return fetch('/admin/api/users/reject', {{ method: 'POST', body: fd }});
       }});
       await Promise.all(promises);
       selectedUsers.clear();
@@ -4278,11 +4379,14 @@ def render_user_page(user) -> str:
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('status')">状态 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('success_rate')">成功率 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('last_used')">最后使用 ↕</th>
+                  <th class="text-left py-3 px-3">账号</th>
+                  <th class="text-left py-3 px-3">额度</th>
+                  <th class="text-left py-3 px-3">检测时间</th>
                   <th class="text-left py-3 px-3">操作</th>
                 </tr>
               </thead>
               <tbody id="tokenTable">
-                <tr><td colspan="7" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+                <tr><td colspan="10" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
               </tbody>
             </table>
           </div>
@@ -4403,21 +4507,49 @@ def render_user_page(user) -> str:
     </div>
   </main>
   <div id="donateModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
-    <div class="card w-full max-w-md mx-4" style="max-height: 90vh; overflow-y: auto;">
+    <div class="card w-full max-w-md mx-4">
       <h3 class="text-lg font-bold mb-4">🎁 批量添加 Refresh Token</h3>
+
+      <!-- 认证类型选择 -->
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-2 block">🔐 认证类型</label>
+        <div class="flex gap-2">
+          <button onclick="setAuthType('social')" id="authType-social" class="auth-type-btn flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all" style="background: var(--primary); color: white; border: 1px solid var(--primary);">
+            Social (默认)
+          </button>
+          <button onclick="setAuthType('idc')" id="authType-idc" class="auth-type-btn flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all" style="background: var(--bg-input); border: 1px solid var(--border);">
+            IDC (Builder ID)
+          </button>
+        </div>
+        <p class="text-xs mt-1" style="color: var(--text-muted);">💡 Social: Kiro 桌面端登录 | IDC: AWS Builder ID 登录</p>
+      </div>
+
+      <input type="hidden" id="donateAuthType" value="social">
 
       <!-- Token 输入区域 -->
       <div class="mb-3">
         <label class="text-sm font-medium mb-2 block">📝 粘贴 Token</label>
-        <textarea id="donateTokens" class="w-full h-32 p-3 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border);" placeholder="支持以下格式：&#10;• Social: 每行一个 Token 或逗号分隔&#10;• IDC: JSON 格式 {&quot;clientId&quot;:&quot;...&quot;, &quot;clientSecret&quot;:&quot;...&quot;, &quot;refreshToken&quot;:&quot;...&quot;}"></textarea>
-        <p class="text-xs mt-1" style="color: var(--text-muted);">💡 IDC 用户请粘贴包含 clientId/clientSecret 的 JSON，系统自动识别认证类型</p>
+        <textarea id="donateTokens" class="w-full h-32 p-3 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border);" placeholder="支持以下格式：&#10;• 每行一个 Token&#10;• 逗号分隔：token1, token2, token3&#10;• 混合格式"></textarea>
+        <p class="text-xs mt-1" style="color: var(--text-muted);">💡 支持多行或逗号分隔，自动去除空行和重复项</p>
+      </div>
+
+      <!-- IDC 额外字段（仅 IDC 模式显示） -->
+      <div id="idcFields" class="mb-3 p-3 rounded-lg" style="background: var(--bg-input); border: 1px solid var(--border); display: none;">
+        <p class="text-sm font-medium mb-2">🆔 IDC 认证信息</p>
+        <div class="mb-2">
+          <input type="text" id="donateClientId" class="w-full px-3 py-2 rounded-lg text-sm" style="background: var(--bg-card); border: 1px solid var(--border);" placeholder="Client ID">
+        </div>
+        <div>
+          <input type="password" id="donateClientSecret" class="w-full px-3 py-2 rounded-lg text-sm" style="background: var(--bg-card); border: 1px solid var(--border);" placeholder="Client Secret">
+        </div>
+        <p class="text-xs mt-2" style="color: var(--text-muted);">⚠️ IDC 模式下所有 Token 共用同一组 Client ID/Secret</p>
       </div>
 
       <!-- 文件上传 -->
       <div class="mb-4">
         <label class="text-sm font-medium mb-2 block">📁 或上传 JSON 文件</label>
         <input id="donateFile" type="file" accept=".json" class="w-full text-sm p-2 rounded-lg" style="background: var(--bg-input); border: 1px solid var(--border);">
-        <p class="text-xs mt-1" style="color: var(--text-muted);">支持 Kiro Account Manager 导出的 JSON 文件</p>
+        <p class="text-xs mt-1" style="color: var(--text-muted);">支持 Kiro Account Manager 导出的 JSON 文件（自动识别 IDC 凭证）</p>
       </div>
 
       <!-- 可见性选择 -->
@@ -4492,6 +4624,24 @@ def render_user_page(user) -> str:
       </div>
     </div>
   </div>
+  <!-- 账号信息弹窗 -->
+  <div id="accountInfoModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
+    <div class="card w-full max-w-md mx-4">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-bold">📊 账号信息</h3>
+        <button onclick="hideAccountInfoModal()" class="text-2xl leading-none" style="color: var(--text-muted);">&times;</button>
+      </div>
+      <div id="accountInfoContent">
+        <div class="text-center py-8" style="color: var(--text-muted);">
+          <div class="animate-spin inline-block w-6 h-6 border-2 border-current border-t-transparent rounded-full mb-2"></div>
+          <p>加载中...</p>
+        </div>
+      </div>
+      <div class="flex justify-end mt-4">
+        <button onclick="hideAccountInfoModal()" class="btn-primary px-4 py-2">关闭</button>
+      </div>
+    </div>
+  </div>
   __COMMON_FOOTER__
   <style>
     .user-hero {{
@@ -4544,11 +4694,6 @@ def render_user_page(user) -> str:
     }}
     .donate-mode-btn {{ color: var(--text-muted); }}
     .donate-mode-btn.active {{
-      background: linear-gradient(135deg, var(--primary), var(--accent));
-      color: white;
-    }}
-    .auth-type-btn {{ color: var(--text-muted); }}
-    .auth-type-btn.active {{
       background: linear-gradient(135deg, var(--primary), var(--accent));
       color: white;
     }}
@@ -4862,7 +5007,7 @@ def render_user_page(user) -> str:
     function renderTokenTable(tokens) {{
       const tb = document.getElementById('tokenTable');
       if (!tokens || !tokens.length) {{
-        tb.innerHTML = '<tr><td colspan="7" class="py-8 text-center" style="color: var(--text-muted);"><div class="mb-3">还没有 Token，先添加一个吧</div><button type="button" onclick="showDonateModal()" class="btn-primary text-sm px-3 py-1.5">+ 添加 Token</button></td></tr>';
+        tb.innerHTML = '<tr><td colspan="10" class="py-8 text-center" style="color: var(--text-muted);"><div class="mb-3">还没有 Token，先添加一个吧</div><button type="button" onclick="showDonateModal()" class="btn-primary text-sm px-3 py-1.5">+ 添加 Token</button></td></tr>';
         document.getElementById('tokensPagination').style.display = 'none';
         document.getElementById('selectAllTokens').checked = false;
         return;
@@ -4874,6 +5019,17 @@ def render_user_page(user) -> str:
         const toggleBtn = canToggle
           ? `<button onclick="toggleVisibility(${{t.id}}, '${{toggleTarget}}')" class="text-xs px-2 py-1 rounded bg-indigo-500/20 text-indigo-400 mr-1">${{toggleLabel}}</button>`
           : '';
+        // 账号信息显示
+        const acctStatus = t.account_status;
+        const acctStatusHtml = acctStatus
+          ? (acctStatus === 'Active' ? '<span class="text-green-400">正常</span>' : '<span class="text-red-400">封禁</span>')
+          : '<span style="color: var(--text-muted);">-</span>';
+        const acctUsage = (t.account_usage !== null && t.account_limit !== null)
+          ? `${{t.account_usage.toFixed(1)}}/${{t.account_limit.toFixed(1)}}`
+          : '-';
+        const acctChecked = t.account_checked_at
+          ? new Date(t.account_checked_at * 1000).toLocaleString()
+          : '-';
         return `
           <tr class="table-row">
             <td class="py-3 px-3">
@@ -4884,7 +5040,11 @@ def render_user_page(user) -> str:
             <td class="py-3 px-3">${{renderTokenStatus(t.status)}}</td>
             <td class="py-3 px-3">${{formatSuccessRate(t.success_rate)}}</td>
             <td class="py-3 px-3">${{t.last_used ? new Date(t.last_used).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3">${{acctStatusHtml}}</td>
+            <td class="py-3 px-3" style="color: var(--text-muted);">${{acctUsage}}</td>
+            <td class="py-3 px-3" style="color: var(--text-muted); font-size: 0.75rem;">${{acctChecked}}</td>
             <td class="py-3 px-3">
+              <button onclick="showTokenAccountInfo(${{t.id}})" class="text-xs px-2 py-1 rounded bg-cyan-500/20 text-cyan-400 mr-1">账户详情</button>
               ${{toggleBtn}}
               <button onclick="deleteToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
             </td>
@@ -5240,14 +5400,43 @@ def render_user_page(user) -> str:
     function showDonateModal() {{
       document.getElementById('donateModal').style.display = 'flex';
       if (SELF_USE_MODE) setDonateMode('private');
+      setAuthType('social'); // 重置为默认认证类型
     }}
 
     function hideDonateModal() {{
       document.getElementById('donateModal').style.display = 'none';
       setDonateMode('private');
+      setAuthType('social');
       document.getElementById('donateTokens').value = '';
       document.getElementById('donateFile').value = '';
       document.getElementById('donateAnonymous').checked = false;
+      document.getElementById('donateClientId').value = '';
+      document.getElementById('donateClientSecret').value = '';
+    }}
+
+    function setAuthType(type) {{
+      const socialBtn = document.getElementById('authType-social');
+      const idcBtn = document.getElementById('authType-idc');
+      const idcFields = document.getElementById('idcFields');
+
+      if (type === 'idc') {{
+        socialBtn.style.background = 'var(--bg-input)';
+        socialBtn.style.color = 'var(--text)';
+        socialBtn.style.border = '1px solid var(--border)';
+        idcBtn.style.background = 'var(--primary)';
+        idcBtn.style.color = 'white';
+        idcBtn.style.border = '1px solid var(--primary)';
+        idcFields.style.display = 'block';
+      }} else {{
+        socialBtn.style.background = 'var(--primary)';
+        socialBtn.style.color = 'white';
+        socialBtn.style.border = '1px solid var(--primary)';
+        idcBtn.style.background = 'var(--bg-input)';
+        idcBtn.style.color = 'var(--text)';
+        idcBtn.style.border = '1px solid var(--border)';
+        idcFields.style.display = 'none';
+      }}
+      document.getElementById('donateAuthType').value = type;
     }}
 
     function setDonateMode(mode) {{
@@ -5333,7 +5522,7 @@ def render_user_page(user) -> str:
       }}
       const anonymous = document.getElementById('donateAnonymous').checked;
 
-      // 构建请求（后端自动识别 JSON 中的 clientId/clientSecret）
+      // 构建请求
       const fd = new FormData();
       if (file) {{
         fd.append('file', file);
@@ -5342,6 +5531,25 @@ def render_user_page(user) -> str:
       }}
       fd.append('visibility', visibility);
       if (visibility === 'public' && anonymous) fd.append('anonymous', 'true');
+
+      // 添加 IDC 认证参数
+      const authType = document.getElementById('donateAuthType').value;
+      fd.append('auth_type', authType);
+      if (authType === 'idc') {{
+        const clientId = document.getElementById('donateClientId').value.trim();
+        const clientSecret = document.getElementById('donateClientSecret').value.trim();
+        if (!clientId || !clientSecret) {{
+          return showConfirmModal({{
+            title: '提示',
+            message: 'IDC 模式下必须填写 Client ID 和 Client Secret',
+            icon: '⚠️',
+            confirmText: '好的',
+            danger: false
+          }});
+        }}
+        fd.append('client_id', clientId);
+        fd.append('client_secret', clientSecret);
+      }}
 
       // 提交
       try {{
@@ -5416,6 +5624,146 @@ def render_user_page(user) -> str:
       await fetch('/user/api/tokens/' + tokenId, {{ method: 'DELETE' }});
       loadTokens();
       loadProfile();
+    }}
+
+    // 账号信息弹窗相关函数
+    function showAccountInfoModal() {{
+      document.getElementById('accountInfoModal').style.display = 'flex';
+    }}
+
+    function hideAccountInfoModal() {{
+      document.getElementById('accountInfoModal').style.display = 'none';
+    }}
+
+    function renderAccountInfo(data) {{
+      const content = document.getElementById('accountInfoContent');
+
+      // 账号状态
+      const status = data.status || 'Active';
+      const isSuspended = status !== 'Active';
+      const statusColor = isSuspended ? 'text-red-400' : 'text-green-400';
+      const statusText = isSuspended ? '已封禁' : '正常';
+
+      // 订阅类型颜色
+      const subTypeColors = {{
+        'Pro_Plus': 'text-purple-400',
+        'Pro': 'text-indigo-400',
+        'Enterprise': 'text-amber-400',
+        'Teams': 'text-blue-400',
+        'Free': 'text-gray-400'
+      }};
+      const subColor = subTypeColors[data.subscription?.type] || 'text-gray-400';
+
+      // 计算使用百分比
+      const usage = data.usage || {{}};
+      const percentUsed = usage.percentUsed || 0;
+      const progressColor = percentUsed > 80 ? 'bg-red-500' : percentUsed > 50 ? 'bg-amber-500' : 'bg-green-500';
+
+      // 格式化奖励额度
+      let bonusHtml = '';
+      if (usage.bonuses && usage.bonuses.length > 0) {{
+        bonusHtml = usage.bonuses.map(b => `
+          <div class="flex justify-between text-sm py-1">
+            <span style="color: var(--text-muted);">${{b.name || b.code || '奖励额度'}}</span>
+            <span>${{(b.current || 0).toFixed(1)}} / ${{(b.limit || 0).toFixed(1)}}</span>
+          </div>
+        `).join('');
+      }}
+
+      // 剩余天数显示
+      const daysRemaining = data.subscription?.daysRemaining;
+      const daysHtml = (daysRemaining !== undefined && daysRemaining !== null)
+        ? `<span class="text-sm" style="color: var(--text-muted);">剩余 <strong class="text-amber-400">${{daysRemaining}}</strong> 天</span>`
+        : '';
+
+      content.innerHTML = `
+        <div class="space-y-4">
+          <!-- 账号状态 -->
+          <div class="p-3 rounded-lg flex items-center justify-between" style="background: var(--bg-input);">
+            <div>
+              <div class="text-sm mb-1" style="color: var(--text-muted);">邮箱</div>
+              <div class="font-medium">${{data.email || '-'}}</div>
+            </div>
+            <div class="text-right">
+              <div class="text-sm mb-1" style="color: var(--text-muted);">状态</div>
+              <div class="font-bold ${{statusColor}}">${{statusText}}</div>
+            </div>
+          </div>
+
+          <!-- 订阅信息 -->
+          <div class="p-3 rounded-lg" style="background: var(--bg-input);">
+            <div class="text-sm mb-2" style="color: var(--text-muted);">订阅信息</div>
+            <div class="flex items-center justify-between">
+              <span class="font-bold ${{subColor}}">${{data.subscription?.title || 'Free'}}</span>
+              ${{daysHtml}}
+            </div>
+          </div>
+
+          <!-- 额度使用 -->
+          <div class="p-3 rounded-lg" style="background: var(--bg-input);">
+            <div class="text-sm mb-2" style="color: var(--text-muted);">额度使用</div>
+            <div class="flex justify-between mb-2">
+              <span>已使用 <strong>${{(usage.current || 0).toFixed(1)}}</strong></span>
+              <span>总额度 <strong>${{(usage.limit || 0).toFixed(1)}}</strong></span>
+            </div>
+            <div class="w-full h-2 rounded-full" style="background: var(--bg-card);">
+              <div class="h-full rounded-full ${{progressColor}}" style="width: ${{Math.min(percentUsed, 100)}}%;"></div>
+            </div>
+            <div class="text-right text-sm mt-1" style="color: var(--text-muted);">${{percentUsed.toFixed(1)}}%</div>
+          </div>
+
+          <!-- 额度明细 -->
+          <div class="p-3 rounded-lg" style="background: var(--bg-input);">
+            <div class="text-sm mb-2" style="color: var(--text-muted);">额度明细</div>
+            <div class="flex justify-between text-sm py-1">
+              <span style="color: var(--text-muted);">基础额度</span>
+              <span>${{(usage.baseCurrent || 0).toFixed(1)}} / ${{(usage.baseLimit || 0).toFixed(1)}}</span>
+            </div>
+            ${{bonusHtml}}
+          </div>
+
+          <!-- 更新时间 -->
+          <div class="text-xs text-right" style="color: var(--text-muted);">
+            更新于 ${{data.lastUpdated ? new Date(data.lastUpdated).toLocaleString() : '-'}}
+          </div>
+        </div>
+      `;
+    }}
+
+    function renderAccountInfoError(error) {{
+      const content = document.getElementById('accountInfoContent');
+      content.innerHTML = `
+        <div class="text-center py-6">
+          <div class="text-4xl mb-3">❌</div>
+          <p class="text-red-400 mb-2">获取账号信息失败</p>
+          <p class="text-sm" style="color: var(--text-muted);">${{error}}</p>
+        </div>
+      `;
+    }}
+
+    async function showTokenAccountInfo(tokenId) {{
+      // 显示弹窗并重置为加载状态
+      document.getElementById('accountInfoContent').innerHTML = `
+        <div class="text-center py-8" style="color: var(--text-muted);">
+          <div class="animate-spin inline-block w-6 h-6 border-2 border-current border-t-transparent rounded-full mb-2"></div>
+          <p>加载中...</p>
+        </div>
+      `;
+      showAccountInfoModal();
+
+      try {{
+        const response = await fetch('/user/api/tokens/' + tokenId + '/account-info');
+        const data = await response.json();
+
+        if (!response.ok) {{
+          renderAccountInfoError(data.error || '未知错误');
+          return;
+        }}
+
+        renderAccountInfo(data);
+      }} catch (e) {{
+        renderAccountInfoError(e.message || '网络错误');
+      }}
     }}
 
     async function generateKey() {{
@@ -5796,19 +6144,7 @@ def render_tokens_page(user=None) -> str:
 </html>'''
 
 
-def render_login_page() -> str:
-    """Render the login selection page with multiple OAuth2 providers."""
-    from kiro_gateway.metrics import metrics
-    from kiro_gateway.config import OAUTH_CLIENT_ID, GITHUB_CLIENT_ID
-
-    self_use_enabled = metrics.is_self_use_enabled()
-    body_self_use_attr = "true" if self_use_enabled else "false"
-
-    # 检查哪些登录方式已配置
-    linuxdo_enabled = bool(OAUTH_CLIENT_ID)
-    github_enabled = bool(GITHUB_CLIENT_ID)
-
-    # 生成登录按钮 HTML
+def _build_login_buttons(linuxdo_enabled: bool, github_enabled: bool) -> str:
     login_buttons = ""
     if linuxdo_enabled:
         login_buttons += '''
@@ -5826,7 +6162,6 @@ def render_login_page() -> str:
           </a>
         '''
 
-    # 如果没有配置任何登录方式，显示提示
     if not login_buttons:
         login_buttons = '''
           <div class="p-6 rounded-lg text-center" style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35);">
@@ -5839,15 +6174,119 @@ def render_login_page() -> str:
           </div>
         '''
 
+    return login_buttons
+
+
+def render_login_page(
+    error: str = "",
+    info: str = "",
+    email: str = "",
+    username: str = ""
+) -> str:
+    """Render the login selection page with multiple OAuth2 providers."""
+    from kiro_gateway.metrics import metrics
+    from kiro_gateway.config import OAUTH_CLIENT_ID, GITHUB_CLIENT_ID
+
+    self_use_enabled = metrics.is_self_use_enabled()
+    body_self_use_attr = "true" if self_use_enabled else "false"
+    safe_error = html.escape(error) if error else ""
+    safe_info = html.escape(info) if info else ""
+    safe_email = html.escape(email or "")
+    error_html = (
+        f'<div class="mb-4 px-4 py-3 rounded-lg text-sm" '
+        f'style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #f87171;">'
+        f'{safe_error}</div>'
+        if safe_error else ""
+    )
+    info_html = (
+        f'<div class="mb-4 px-4 py-3 rounded-lg text-sm" '
+        f'style="background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.35); color: #4ade80;">'
+        f'{safe_info}</div>'
+        if safe_info else ""
+    )
+
+    linuxdo_enabled = bool(OAUTH_CLIENT_ID)
+    github_enabled = bool(GITHUB_CLIENT_ID)
+    login_buttons = _build_login_buttons(linuxdo_enabled, github_enabled)
+    if self_use_enabled:
+        register_link_html = '<div class="text-xs" style="color: var(--text-muted);">自用模式下禁止新注册</div>'
+    else:
+        register_link_html = '<a href="/register" class="text-sm text-indigo-400 hover:underline">没有账号？去注册</a>'
+
     return f'''<!DOCTYPE html>
 <html lang="zh">
 <head>{COMMON_HEAD}
   <style>
-    .login-card {{
-      background: var(--bg-card);
-      border: 1px solid var(--border);
+    @import url('https://fonts.googleapis.com/css2?family=Newsreader:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+    body {{
+      background:
+        radial-gradient(1200px 600px at 10% 10%, rgba(16, 185, 129, 0.14), transparent),
+        radial-gradient(900px 520px at 90% 20%, rgba(14, 165, 233, 0.16), transparent),
+        radial-gradient(800px 500px at 50% 100%, rgba(245, 158, 11, 0.12), transparent),
+        var(--bg-main);
+      font-family: "Space Grotesk", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }}
+    .auth-shell {{
+      position: relative;
+      overflow: hidden;
+    }}
+    .auth-shell::before {{
+      content: "";
+      position: absolute;
+      inset: -10% 0 auto 0;
+      height: 60%;
+      background-image: radial-gradient(circle at 20% 20%, rgba(148, 163, 184, 0.16) 0, transparent 35%);
+      opacity: 0.6;
+      pointer-events: none;
+    }}
+    .auth-grid {{
+      position: relative;
+      display: grid;
+      gap: 2.5rem;
+      align-items: center;
+    }}
+    @media (min-width: 1024px) {{
+      .auth-grid {{ grid-template-columns: 1.05fr 0.95fr; }}
+    }}
+    .auth-card {{
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.72));
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 1.75rem;
+      box-shadow: 0 32px 70px -40px rgba(15, 23, 42, 0.45);
+      padding: 2rem;
+      backdrop-filter: blur(18px);
+    }}
+    .dark .auth-card {{
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.8), rgba(2, 6, 23, 0.82));
+      border-color: rgba(148, 163, 184, 0.22);
+    }}
+    .auth-title {{
+      font-family: "Newsreader", "Songti SC", serif;
+      font-size: 2rem;
+      letter-spacing: 0.02em;
+    }}
+    .auth-subtitle {{
+      color: var(--text-muted);
+    }}
+    .auth-aside {{
       border-radius: 1.5rem;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15);
+      padding: 2rem;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(16, 185, 129, 0.1));
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+    }}
+    .dark .auth-aside {{
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.18), rgba(16, 185, 129, 0.16));
+    }}
+    .auth-badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.3rem 0.8rem;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      background: rgba(15, 23, 42, 0.9);
+      color: #fff;
     }}
     .btn-login {{
       display: flex;
@@ -5856,18 +6295,70 @@ def render_login_page() -> str:
       gap: 12px;
       width: 100%;
       padding: 14px 24px;
-      border-radius: 12px;
+      border-radius: 14px;
       font-weight: 600;
       font-size: 1rem;
       transition: all 0.3s ease;
       text-decoration: none;
     }}
-    .btn-login:hover {{ transform: translateY(-2px); box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.2); }}
-    .btn-linuxdo {{ background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); color: white; }}
-    .btn-linuxdo:hover {{ background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); }}
-    .btn-github {{ background: #24292f; color: white; }}
-    .btn-github:hover {{ background: #1b1f23; }}
-    .logo-bounce {{ animation: bounce 2s infinite; }}
+    .btn-login:hover {{ transform: translateY(-2px); box-shadow: 0 12px 28px -12px rgba(15, 23, 42, 0.35); }}
+    .btn-linuxdo {{ background: linear-gradient(135deg, #0ea5e9 0%, #22c55e 100%); color: white; }}
+    .btn-linuxdo:hover {{ background: linear-gradient(135deg, #0284c7 0%, #16a34a 100%); }}
+    .btn-github {{ background: #0f172a; color: white; }}
+    .btn-github:hover {{ background: #111827; }}
+    .auth-label {{ font-size: 0.85rem; color: var(--text-muted); }}
+    .auth-input {{
+      width: 100%;
+      padding: 0.75rem 0.95rem;
+      border-radius: 0.85rem;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      color: var(--text);
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }}
+    .auth-input:focus {{
+      outline: none;
+      border-color: #0ea5e9;
+      box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.18);
+    }}
+    .btn-auth {{
+      width: 100%;
+      padding: 0.85rem 1rem;
+      border-radius: 0.9rem;
+      font-weight: 600;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      border: none;
+      cursor: pointer;
+    }}
+    .btn-auth:hover {{ transform: translateY(-1px); box-shadow: 0 12px 28px -16px rgba(15, 23, 42, 0.4); }}
+    .btn-auth:disabled {{
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }}
+    .feature-list {{
+      display: grid;
+      gap: 0.85rem;
+      margin-top: 1.25rem;
+      color: var(--text);
+      font-size: 0.95rem;
+    }}
+    .feature-item {{
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-start;
+    }}
+    .feature-icon {{
+      width: 2rem;
+      height: 2rem;
+      border-radius: 0.8rem;
+      display: grid;
+      place-items: center;
+      background: rgba(255, 255, 255, 0.65);
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      font-size: 1.05rem;
+    }}
     @keyframes bounce {{
       0%, 100% {{ transform: translateY(0); }}
       50% {{ transform: translateY(-10px); }}
@@ -5877,36 +6368,336 @@ def render_login_page() -> str:
 <body data-self-use="{body_self_use_attr}">
   {COMMON_NAV}
 
-  <main class="flex-1 flex items-center justify-center py-12 px-4" style="min-height: calc(100vh - 200px);">
-    <div class="w-full max-w-sm">
-      <div class="login-card p-8">
-        <div class="text-center mb-8">
-          <div class="logo-bounce inline-block text-6xl mb-4">⚡</div>
-          <h1 class="text-2xl font-bold mb-2">欢迎使用 KiroGate</h1>
-          <p style="color: var(--text-muted);">选择登录方式开始使用</p>
-        </div>
-        <div class="self-use-only mb-6 px-4 py-3 rounded-lg text-sm" style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); color: #d97706;">
-          自用模式已开启：仅限已注册用户登录。
-        </div>
-
-        <div class="space-y-4">
-          {login_buttons}
-        </div>
-
-        <div class="my-8 flex items-center">
-          <div class="flex-1 h-px" style="background: var(--border);"></div>
-          <span class="px-4 text-sm" style="color: var(--text-muted);">登录后可以</span>
-          <div class="flex-1 h-px" style="background: var(--border);"></div>
-        </div>
-
-        <div class="grid grid-cols-2 gap-4 text-center text-sm">
-          <div class="p-3 rounded-xl" style="background: var(--bg-main);">
-            <div class="text-2xl mb-1">🎁</div>
-            <div style="color: var(--text-muted);">添加 Token</div>
+  <main class="auth-shell flex-1 py-12 px-4" style="min-height: calc(100vh - 200px);">
+    <div class="max-w-5xl mx-auto">
+      <div class="auth-grid">
+        <div class="auth-card">
+          <div class="mb-8">
+            <span class="auth-badge">登录入口</span>
+            <div class="mt-4">
+              <div class="logo-bounce inline-block text-5xl mb-4">⚡</div>
+              <h1 class="auth-title font-bold mb-2">欢迎回来</h1>
+              <p class="auth-subtitle">用你熟悉的方式继续使用 KiroGate</p>
+            </div>
           </div>
-          <div class="p-3 rounded-xl" style="background: var(--bg-main);">
-            <div class="text-2xl mb-1">🔑</div>
-            <div style="color: var(--text-muted);">生成 API Key</div>
+          {error_html}
+          {info_html}
+          <div class="self-use-only mb-6 px-4 py-3 rounded-lg text-sm" style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); color: #d97706;">
+            自用模式已开启：仅限已注册用户登录。
+          </div>
+
+          <div class="space-y-4 mb-6">
+            <form method="post" action="/auth/login" class="space-y-3">
+              <div class="text-sm font-semibold">邮箱登录</div>
+              <label class="auth-label" for="loginEmail">邮箱</label>
+              <input id="loginEmail" name="email" type="email" class="auth-input" required value="{safe_email}">
+              <label class="auth-label" for="loginPassword">密码</label>
+              <input id="loginPassword" name="password" type="password" class="auth-input" required>
+              <button type="submit" class="btn-auth" style="background: linear-gradient(135deg, #0ea5e9 0%, #22c55e 100%); color: #fff;">登录</button>
+            </form>
+            <div class="text-right">{register_link_html}</div>
+          </div>
+
+          <div class="space-y-4">
+            {login_buttons}
+          </div>
+        </div>
+
+        <div class="auth-aside">
+          <div class="text-xl font-semibold mb-2">可信赖的 AI 入口</div>
+          <p class="text-sm" style="color: var(--text-muted);">跨模型、跨租户、一站式接入。我们把复杂性留在后端。</p>
+          <div class="feature-list">
+            <div class="feature-item">
+              <div class="feature-icon">🔒</div>
+              <div>
+                <div class="font-medium">安全会话</div>
+                <div class="text-xs" style="color: var(--text-muted);">基于加密与风控策略的登录保护</div>
+              </div>
+            </div>
+            <div class="feature-item">
+              <div class="feature-icon">⚡</div>
+              <div>
+                <div class="font-medium">极速接入</div>
+                <div class="text-xs" style="color: var(--text-muted);">一键接入 OpenAI / Anthropic 生态</div>
+              </div>
+            </div>
+            <div class="feature-item">
+              <div class="feature-icon">🎯</div>
+              <div>
+                <div class="font-medium">精细配额</div>
+                <div class="text-xs" style="color: var(--text-muted);">清晰可控的 Token / Key 管理</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  {COMMON_FOOTER}
+</body>
+</html>'''
+
+
+def render_register_page(
+    error: str = "",
+    info: str = "",
+    email: str = "",
+    username: str = ""
+) -> str:
+    """Render the register page."""
+    from kiro_gateway.metrics import metrics
+    from kiro_gateway.config import OAUTH_CLIENT_ID, GITHUB_CLIENT_ID
+
+    self_use_enabled = metrics.is_self_use_enabled()
+    body_self_use_attr = "true" if self_use_enabled else "false"
+    require_approval = metrics.is_require_approval()
+    safe_error = html.escape(error) if error else ""
+    safe_info = html.escape(info) if info else ""
+    safe_email = html.escape(email or "")
+    safe_username = html.escape(username or "")
+    error_html = (
+        f'<div class="mb-4 px-4 py-3 rounded-lg text-sm" '
+        f'style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #f87171;">'
+        f'{safe_error}</div>'
+        if safe_error else ""
+    )
+    info_html = (
+        f'<div class="mb-4 px-4 py-3 rounded-lg text-sm" '
+        f'style="background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.35); color: #4ade80;">'
+        f'{safe_info}</div>'
+        if safe_info else ""
+    )
+    register_disabled = "disabled" if self_use_enabled else ""
+
+    linuxdo_enabled = bool(OAUTH_CLIENT_ID)
+    github_enabled = bool(GITHUB_CLIENT_ID)
+    login_buttons = _build_login_buttons(linuxdo_enabled, github_enabled)
+    if self_use_enabled:
+        login_link_html = '<div class="text-xs" style="color: var(--text-muted);">自用模式下禁止新注册</div>'
+    else:
+        login_link_html = '<a href="/login" class="text-sm text-indigo-400 hover:underline">已有账号？去登录</a>'
+
+    return f'''<!DOCTYPE html>
+<html lang="zh">
+<head>{COMMON_HEAD}
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Newsreader:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+    body {{
+      background:
+        radial-gradient(1200px 600px at 10% 10%, rgba(16, 185, 129, 0.14), transparent),
+        radial-gradient(900px 520px at 90% 20%, rgba(14, 165, 233, 0.16), transparent),
+        radial-gradient(800px 500px at 50% 100%, rgba(245, 158, 11, 0.12), transparent),
+        var(--bg-main);
+      font-family: "Space Grotesk", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }}
+    .auth-shell {{
+      position: relative;
+      overflow: hidden;
+    }}
+    .auth-shell::before {{
+      content: "";
+      position: absolute;
+      inset: -10% 0 auto 0;
+      height: 60%;
+      background-image: radial-gradient(circle at 20% 20%, rgba(148, 163, 184, 0.16) 0, transparent 35%);
+      opacity: 0.6;
+      pointer-events: none;
+    }}
+    .auth-grid {{
+      position: relative;
+      display: grid;
+      gap: 2.5rem;
+      align-items: center;
+    }}
+    @media (min-width: 1024px) {{
+      .auth-grid {{ grid-template-columns: 1.05fr 0.95fr; }}
+    }}
+    .auth-card {{
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.72));
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 1.75rem;
+      box-shadow: 0 32px 70px -40px rgba(15, 23, 42, 0.45);
+      padding: 2rem;
+      backdrop-filter: blur(18px);
+    }}
+    .dark .auth-card {{
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.8), rgba(2, 6, 23, 0.82));
+      border-color: rgba(148, 163, 184, 0.22);
+    }}
+    .auth-title {{
+      font-family: "Newsreader", "Songti SC", serif;
+      font-size: 2rem;
+      letter-spacing: 0.02em;
+    }}
+    .auth-subtitle {{
+      color: var(--text-muted);
+    }}
+    .auth-aside {{
+      border-radius: 1.5rem;
+      padding: 2rem;
+      border: 1px solid rgba(148, 163, 184, 0.28);
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(16, 185, 129, 0.1));
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+    }}
+    .dark .auth-aside {{
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.18), rgba(16, 185, 129, 0.16));
+    }}
+    .auth-badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.3rem 0.8rem;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      background: rgba(15, 23, 42, 0.9);
+      color: #fff;
+    }}
+    .btn-login {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      width: 100%;
+      padding: 14px 24px;
+      border-radius: 14px;
+      font-weight: 600;
+      font-size: 1rem;
+      transition: all 0.3s ease;
+      text-decoration: none;
+    }}
+    .btn-login:hover {{ transform: translateY(-2px); box-shadow: 0 12px 28px -12px rgba(15, 23, 42, 0.35); }}
+    .btn-linuxdo {{ background: linear-gradient(135deg, #0ea5e9 0%, #22c55e 100%); color: white; }}
+    .btn-linuxdo:hover {{ background: linear-gradient(135deg, #0284c7 0%, #16a34a 100%); }}
+    .btn-github {{ background: #0f172a; color: white; }}
+    .btn-github:hover {{ background: #111827; }}
+    .auth-label {{ font-size: 0.85rem; color: var(--text-muted); }}
+    .auth-input {{
+      width: 100%;
+      padding: 0.75rem 0.95rem;
+      border-radius: 0.85rem;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      color: var(--text);
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }}
+    .auth-input:focus {{
+      outline: none;
+      border-color: #0ea5e9;
+      box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.18);
+    }}
+    .btn-auth {{
+      width: 100%;
+      padding: 0.85rem 1rem;
+      border-radius: 0.9rem;
+      font-weight: 600;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      border: none;
+      cursor: pointer;
+    }}
+    .btn-auth:hover {{ transform: translateY(-1px); box-shadow: 0 12px 28px -16px rgba(15, 23, 42, 0.4); }}
+    .btn-auth:disabled {{
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }}
+    .feature-list {{
+      display: grid;
+      gap: 0.85rem;
+      margin-top: 1.25rem;
+      color: var(--text);
+      font-size: 0.95rem;
+    }}
+    .feature-item {{
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-start;
+    }}
+    .feature-icon {{
+      width: 2rem;
+      height: 2rem;
+      border-radius: 0.8rem;
+      display: grid;
+      place-items: center;
+      background: rgba(255, 255, 255, 0.65);
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      font-size: 1.05rem;
+    }}
+    @keyframes bounce {{
+      0%, 100% {{ transform: translateY(0); }}
+      50% {{ transform: translateY(-10px); }}
+    }}
+  </style>
+</head>
+<body data-self-use="{body_self_use_attr}">
+  {COMMON_NAV}
+
+  <main class="auth-shell flex-1 py-12 px-4" style="min-height: calc(100vh - 200px);">
+    <div class="max-w-5xl mx-auto">
+      <div class="auth-grid">
+        <div class="auth-card">
+          <div class="mb-8">
+            <span class="auth-badge">注册入口</span>
+            <div class="mt-4">
+              <div class="logo-bounce inline-block text-5xl mb-4">✨</div>
+              <h1 class="auth-title font-bold mb-2">创建新账号</h1>
+              <p class="auth-subtitle">使用邮箱注册或选择 OAuth</p>
+            </div>
+          </div>
+          {error_html}
+          {info_html}
+          <div class="self-use-only mb-6 px-4 py-3 rounded-lg text-sm" style="background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35); color: #d97706;">
+            自用模式已开启：仅限已注册用户登录。
+          </div>
+
+          <div class="space-y-4 mb-6">
+            <form method="post" action="/auth/register" class="space-y-3">
+              <div class="text-sm font-semibold">邮箱注册</div>
+              <label class="auth-label" for="registerEmail">邮箱</label>
+              <input id="registerEmail" name="email" type="email" class="auth-input" required value="{safe_email}">
+              <label class="auth-label" for="registerUsername">用户名（可选）</label>
+              <input id="registerUsername" name="username" type="text" class="auth-input" value="{safe_username}">
+              <label class="auth-label" for="registerPassword">密码（至少 8 位）</label>
+              <input id="registerPassword" name="password" type="password" class="auth-input" required minlength="8">
+              <button type="submit" class="btn-auth" style="background: linear-gradient(135deg, #0f172a 0%, #1f2937 100%); color: #fff;" {register_disabled}>注册</button>
+              <div class="text-xs" style="color: var(--text-muted);">
+                {("注册后需管理员审核通过" if require_approval else "注册成功后可直接登录") if not self_use_enabled else "自用模式下禁止新注册"}
+              </div>
+            </form>
+            <div class="text-right">{login_link_html}</div>
+          </div>
+
+          <div class="space-y-4">
+            {login_buttons}
+          </div>
+        </div>
+
+        <div class="auth-aside">
+          <div class="text-xl font-semibold mb-2">加入协作网络</div>
+          <p class="text-sm" style="color: var(--text-muted);">马上开启你的专属 Token 与 API Key 管理。</p>
+          <div class="feature-list">
+            <div class="feature-item">
+              <div class="feature-icon">🧭</div>
+              <div>
+                <div class="font-medium">快速引导</div>
+                <div class="text-xs" style="color: var(--text-muted);">注册后直接进入控制台引导</div>
+              </div>
+            </div>
+            <div class="feature-item">
+              <div class="feature-icon">📊</div>
+              <div>
+                <div class="font-medium">可视化面板</div>
+                <div class="text-xs" style="color: var(--text-muted);">实时查看 Token 使用情况</div>
+              </div>
+            </div>
+            <div class="feature-item">
+              <div class="feature-icon">🛡️</div>
+              <div>
+                <div class="font-medium">审批机制</div>
+                <div class="text-xs" style="color: var(--text-muted);">注册审批与权限一目了然</div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

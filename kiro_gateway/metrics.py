@@ -107,6 +107,7 @@ class PrometheusMetrics:
         self._ip_blacklist: Dict[str, Dict] = {}  # {ip: {banned_at, reason}}
         self._site_enabled: bool = True  # Site on/off switch
         self._self_use_enabled: bool = False  # Self-use mode toggle
+        self._require_approval: bool = True  # Registration approval toggle
         self._proxy_api_key: str = settings.proxy_api_key
 
         # Load persisted data
@@ -214,6 +215,11 @@ class PrometheusMetrics:
                 row = cursor.fetchone()
                 if row:
                     self._self_use_enabled = row[1] == "true"
+
+                cursor = conn.execute("SELECT key, value FROM site_config WHERE key = 'require_approval'")
+                row = cursor.fetchone()
+                if row:
+                    self._require_approval = row[1] == "true"
 
                 cursor = conn.execute("SELECT key, value FROM site_config WHERE key = 'proxy_api_key'")
                 row = cursor.fetchone()
@@ -842,6 +848,11 @@ class PrometheusMetrics:
         with self._lock:
             return self._self_use_enabled
 
+    def is_require_approval(self) -> bool:
+        """Check if registration approval is required."""
+        with self._lock:
+            return self._require_approval
+
     def set_self_use_enabled(self, enabled: bool) -> bool:
         """Enable or disable self-use mode."""
         with self._lock:
@@ -857,6 +868,23 @@ class PrometheusMetrics:
                 return True
             except Exception as e:
                 logger.error(f"Failed to set self-use status: {e}")
+                return False
+
+    def set_require_approval(self, enabled: bool) -> bool:
+        """Enable or disable registration approval requirement."""
+        with self._lock:
+            self._require_approval = enabled
+            try:
+                with sqlite3.connect(self._db_path) as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO site_config (key, value) VALUES (?, ?)",
+                        ("require_approval", "true" if enabled else "false")
+                    )
+                    conn.commit()
+                logger.info(f"Require approval enabled: {enabled}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to set require approval: {e}")
                 return False
 
     def get_proxy_api_key(self) -> str:
@@ -902,6 +930,7 @@ class PrometheusMetrics:
                 "tokenValid": self._token_valid,
                 "siteEnabled": self._site_enabled,
                 "selfUseEnabled": self._self_use_enabled,
+                "requireApproval": self._require_approval,
                 "uptimeSeconds": round(time.time() - self._start_time, 2),
                 "totalIPs": len(self._ip_requests),
                 "bannedIPs": len(self._ip_blacklist),

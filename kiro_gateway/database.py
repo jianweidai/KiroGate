@@ -43,11 +43,15 @@ class User:
     id: int
     linuxdo_id: Optional[str]
     github_id: Optional[str]
+    email: Optional[str]
     username: str
     avatar_url: Optional[str]
     trust_level: int
     is_admin: bool
     is_banned: bool
+    approval_status: str
+    password_hash: Optional[str]
+    session_version: int
     created_at: int
     last_login: Optional[int]
 
@@ -66,6 +70,12 @@ class DonatedToken:
     last_used: Optional[int]
     last_check: Optional[int]
     created_at: int
+    # 账号信息缓存
+    account_email: Optional[str] = None
+    account_status: Optional[str] = None
+    account_usage: Optional[float] = None
+    account_limit: Optional[float] = None
+    account_checked_at: Optional[int] = None
 
     @property
     def success_rate(self) -> float:
@@ -118,11 +128,15 @@ class UserDatabase:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     linuxdo_id TEXT,
                     github_id TEXT,
+                    email TEXT,
                     username TEXT NOT NULL,
                     avatar_url TEXT,
                     trust_level INTEGER DEFAULT 0,
                     is_admin INTEGER DEFAULT 0,
                     is_banned INTEGER DEFAULT 0,
+                    approval_status TEXT DEFAULT 'approved',
+                    password_hash TEXT,
+                    session_version INTEGER DEFAULT 1,
                     created_at INTEGER NOT NULL,
                     last_login INTEGER
                 );
@@ -135,9 +149,6 @@ class UserDatabase:
                     user_id INTEGER NOT NULL,
                     refresh_token_encrypted TEXT NOT NULL,
                     token_hash TEXT UNIQUE NOT NULL,
-                    auth_type TEXT DEFAULT 'social',
-                    client_id_encrypted TEXT,
-                    client_secret_encrypted TEXT,
                     visibility TEXT DEFAULT 'private',
                     is_anonymous INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'active',
@@ -226,23 +237,40 @@ class UserDatabase:
                 conn.execute(
                     "ALTER TABLE tokens ADD COLUMN is_anonymous INTEGER DEFAULT 0"
                 )
-            if "auth_type" not in columns:
-                conn.execute(
-                    "ALTER TABLE tokens ADD COLUMN auth_type TEXT DEFAULT 'social'"
-                )
-            if "client_id_encrypted" not in columns:
-                conn.execute(
-                    "ALTER TABLE tokens ADD COLUMN client_id_encrypted TEXT"
-                )
-            if "client_secret_encrypted" not in columns:
-                conn.execute(
-                    "ALTER TABLE tokens ADD COLUMN client_secret_encrypted TEXT"
-                )
+            user_columns = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+            if "email" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+            if "approval_status" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN approval_status TEXT DEFAULT 'approved'")
+            if "password_hash" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+            if "session_version" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN session_version INTEGER DEFAULT 1")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
             announcement_columns = {row[1] for row in conn.execute("PRAGMA table_info(announcements)")}
             if "allow_guest" not in announcement_columns:
                 conn.execute(
                     "ALTER TABLE announcements ADD COLUMN allow_guest INTEGER DEFAULT 0"
                 )
+            # 添加 token 账号信息缓存字段
+            token_columns = {row[1] for row in conn.execute("PRAGMA table_info(tokens)")}
+            if "account_email" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_email TEXT")
+            if "account_status" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_status TEXT")
+            if "account_usage" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_usage REAL")
+            if "account_limit" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_limit REAL")
+            if "account_checked_at" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_checked_at INTEGER")
+            # 添加 IDC 认证相关字段
+            if "auth_type" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN auth_type TEXT DEFAULT 'social'")
+            if "client_id_encrypted" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN client_id_encrypted TEXT")
+            if "client_secret_encrypted" not in token_columns:
+                conn.execute("ALTER TABLE tokens ADD COLUMN client_secret_encrypted TEXT")
             conn.commit()
         logger.info(f"User database initialized: {self._db_path}")
 
@@ -267,31 +295,52 @@ class UserDatabase:
         username: str,
         linuxdo_id: Optional[str] = None,
         github_id: Optional[str] = None,
+        email: Optional[str] = None,
         avatar_url: Optional[str] = None,
-        trust_level: int = 0
+        trust_level: int = 0,
+        approval_status: str = "approved",
+        password_hash: Optional[str] = None
     ) -> User:
         """Create a new user."""
-        if not linuxdo_id and not github_id:
-            raise ValueError("必须提供 linuxdo_id 或 github_id")
+        if not linuxdo_id and not github_id and not email:
+            raise ValueError("必须提供 linuxdo_id、github_id 或 email")
 
         now = int(time.time() * 1000)
         with self._lock:
             with self._get_conn() as conn:
                 cursor = conn.execute(
-                    """INSERT INTO users (linuxdo_id, github_id, username, avatar_url, trust_level, created_at, last_login)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (linuxdo_id, github_id, username, avatar_url, trust_level, now, now)
+                    """INSERT INTO users
+                       (linuxdo_id, github_id, email, username, avatar_url, trust_level, approval_status, password_hash,
+                        session_version, created_at, last_login)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        linuxdo_id,
+                        github_id,
+                        email,
+                        username,
+                        avatar_url,
+                        trust_level,
+                        approval_status,
+                        password_hash,
+                        1,  # session_version starts at 1
+                        now,
+                        now
+                    )
                 )
                 user_id = cursor.lastrowid
                 return User(
                     id=user_id,
                     linuxdo_id=linuxdo_id,
                     github_id=github_id,
+                    email=email,
                     username=username,
                     avatar_url=avatar_url,
                     trust_level=trust_level,
                     is_admin=False,
                     is_banned=False,
+                    approval_status=approval_status,
+                    password_hash=password_hash,
+                    session_version=1,
                     created_at=now,
                     last_login=now
                 )
@@ -429,6 +478,12 @@ class UserDatabase:
             row = conn.execute("SELECT * FROM users WHERE github_id = ?", (github_id,)).fetchone()
             return self._row_to_user(row) if row else None
 
+    def get_user_by_email(self, email: str) -> Optional[User]:
+        """Get user by email."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            return self._row_to_user(row) if row else None
+
     def get_or_create_user_by_linuxdo(
         self,
         linuxdo_id: str,
@@ -464,11 +519,14 @@ class UserDatabase:
                     id=user_id,
                     linuxdo_id=linuxdo_id,
                     github_id=None,
+                    email=None,
                     username=username,
                     avatar_url=avatar_url,
                     trust_level=trust_level,
                     is_admin=False,
                     is_banned=False,
+                    approval_status="approved",
+                    password_hash=None,
                     created_at=now,
                     last_login=now
                 )
@@ -508,11 +566,14 @@ class UserDatabase:
                     id=user_id,
                     linuxdo_id=None,
                     github_id=github_id,
+                    email=None,
                     username=username,
                     avatar_url=avatar_url,
                     trust_level=trust_level,
                     is_admin=False,
                     is_banned=False,
+                    approval_status="approved",
+                    password_hash=None,
                     created_at=now,
                     last_login=now
                 )
@@ -536,6 +597,15 @@ class UserDatabase:
             with self._get_conn() as conn:
                 conn.execute("UPDATE users SET is_banned = ? WHERE id = ?", (1 if is_banned else 0, user_id))
 
+    def set_user_approval_status(self, user_id: int, status: str) -> None:
+        """Set user approval status."""
+        allowed = {"pending", "approved", "rejected"}
+        if status not in allowed:
+            raise ValueError("无效的审核状态")
+        with self._lock:
+            with self._get_conn() as conn:
+                conn.execute("UPDATE users SET approval_status = ? WHERE id = ?", (status, user_id))
+
     def get_all_users(
         self,
         limit: int = 100,
@@ -543,6 +613,7 @@ class UserDatabase:
         search: str = "",
         is_admin: Optional[bool] = None,
         is_banned: Optional[bool] = None,
+        approval_status: Optional[str] = None,
         trust_level: Optional[int] = None,
         sort_field: str = "created_at",
         sort_order: str = "desc"
@@ -553,15 +624,18 @@ class UserDatabase:
         if search:
             like = f"%{search}%"
             where.append(
-                "(username LIKE ? OR CAST(id AS TEXT) LIKE ? OR linuxdo_id LIKE ? OR github_id LIKE ?)"
+                "(username LIKE ? OR CAST(id AS TEXT) LIKE ? OR linuxdo_id LIKE ? OR github_id LIKE ? OR email LIKE ?)"
             )
-            params.extend([like, like, like, like])
+            params.extend([like, like, like, like, like])
         if is_admin is not None:
             where.append("is_admin = ?")
             params.append(1 if is_admin else 0)
         if is_banned is not None:
             where.append("is_banned = ?")
             params.append(1 if is_banned else 0)
+        if approval_status:
+            where.append("approval_status = ?")
+            params.append(approval_status)
         if trust_level is not None:
             where.append("trust_level = ?")
             params.append(trust_level)
@@ -575,6 +649,7 @@ class UserDatabase:
             "token_count": "(SELECT COUNT(*) FROM tokens t WHERE t.user_id = users.id)",
             "api_key_count": "(SELECT COUNT(*) FROM api_keys k WHERE k.user_id = users.id AND k.is_active = 1)",
             "is_banned": "is_banned",
+            "approval_status": "approval_status",
         }
         sort_column = allowed_sort.get(sort_field, "created_at")
         order = "ASC" if sort_order.lower() == "asc" else "DESC"
@@ -594,6 +669,7 @@ class UserDatabase:
         search: str = "",
         is_admin: Optional[bool] = None,
         is_banned: Optional[bool] = None,
+        approval_status: Optional[str] = None,
         trust_level: Optional[int] = None
     ) -> int:
         """Get total user count with optional filters."""
@@ -602,15 +678,18 @@ class UserDatabase:
         if search:
             like = f"%{search}%"
             where.append(
-                "(username LIKE ? OR CAST(id AS TEXT) LIKE ? OR linuxdo_id LIKE ? OR github_id LIKE ?)"
+                "(username LIKE ? OR CAST(id AS TEXT) LIKE ? OR linuxdo_id LIKE ? OR github_id LIKE ? OR email LIKE ?)"
             )
-            params.extend([like, like, like, like])
+            params.extend([like, like, like, like, like])
         if is_admin is not None:
             where.append("is_admin = ?")
             params.append(1 if is_admin else 0)
         if is_banned is not None:
             where.append("is_banned = ?")
             params.append(1 if is_banned else 0)
+        if approval_status:
+            where.append("approval_status = ?")
+            params.append(approval_status)
         if trust_level is not None:
             where.append("trust_level = ?")
             params.append(trust_level)
@@ -624,18 +703,56 @@ class UserDatabase:
 
     def _row_to_user(self, row: sqlite3.Row) -> User:
         """Convert database row to User object."""
+        # Handle session_version for backward compatibility
+        session_version = 1
+        if hasattr(row, "keys") and "session_version" in row.keys():
+            session_version = row["session_version"] or 1
         return User(
             id=row["id"],
             linuxdo_id=row["linuxdo_id"],
             github_id=row["github_id"],
+            email=row["email"],
             username=row["username"],
             avatar_url=row["avatar_url"],
             trust_level=row["trust_level"],
             is_admin=bool(row["is_admin"]),
             is_banned=bool(row["is_banned"]),
+            approval_status=row["approval_status"] or "approved",
+            password_hash=row["password_hash"],
+            session_version=session_version,
             created_at=row["created_at"],
             last_login=row["last_login"]
         )
+
+    def get_session_version(self, user_id: int) -> int:
+        """Get current session version for a user."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT session_version FROM users WHERE id = ?",
+                (user_id,)
+            ).fetchone()
+            if row:
+                return row["session_version"] or 1
+            return 1
+
+    def increment_session_version(self, user_id: int) -> int:
+        """
+        Increment session version for a user, invalidating all existing sessions.
+
+        Returns:
+            New session version
+        """
+        with self._lock:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE users SET session_version = COALESCE(session_version, 0) + 1 WHERE id = ?",
+                    (user_id,)
+                )
+                row = conn.execute(
+                    "SELECT session_version FROM users WHERE id = ?",
+                    (user_id,)
+                ).fetchone()
+                return row["session_version"] if row else 1
 
     # ==================== Token Methods ====================
 
@@ -680,7 +797,7 @@ class UserDatabase:
         if auth_type == "idc":
             if not client_id or not client_secret:
                 return False, "IDC 模式需要提供 Client ID 和 Client Secret"
-        
+
         token_hash = self._hash_token(refresh_token)
         encrypted = self._encrypt_token(refresh_token)
         client_id_enc = self._encrypt_token(client_id) if client_id else None
@@ -825,30 +942,6 @@ class UserDatabase:
                 return self._decrypt_token(row[0])
             return None
 
-    def get_token_credentials(self, token_id: int) -> Optional[Dict[str, Optional[str]]]:
-        """
-        获取 token 的完整凭证信息（解密后）。
-        
-        Returns:
-            包含 refresh_token, auth_type, client_id, client_secret 的字典
-        """
-        with self._get_conn() as conn:
-            row = conn.execute(
-                """SELECT refresh_token_encrypted, auth_type,
-                          client_id_encrypted, client_secret_encrypted
-                   FROM tokens WHERE id = ?""",
-                (token_id,)
-            ).fetchone()
-            if not row:
-                return None
-            
-            return {
-                "refresh_token": self._decrypt_token(row["refresh_token_encrypted"]),
-                "auth_type": row["auth_type"] or "social",
-                "client_id": self._decrypt_token(row["client_id_encrypted"]) if row["client_id_encrypted"] else None,
-                "client_secret": self._decrypt_token(row["client_secret_encrypted"]) if row["client_secret_encrypted"] else None,
-            }
-
     def set_token_visibility(self, token_id: int, visibility: str) -> bool:
         """Set token visibility (public/private)."""
         if visibility not in ("public", "private"):
@@ -942,21 +1035,89 @@ class UserDatabase:
 
     def _row_to_token(self, row: sqlite3.Row) -> DonatedToken:
         """Convert database row to DonatedToken object."""
-        # 兼容旧数据，auth_type 可能不存在
-        auth_type = row["auth_type"] if "auth_type" in row.keys() else "social"
         return DonatedToken(
             id=row["id"],
             user_id=row["user_id"],
             token_hash=row["token_hash"],
-            auth_type=auth_type,
+            auth_type=row["auth_type"] if "auth_type" in row.keys() else "social",
             visibility=row["visibility"],
             status=row["status"],
             success_count=row["success_count"],
             fail_count=row["fail_count"],
             last_used=row["last_used"],
             last_check=row["last_check"],
-            created_at=row["created_at"]
+            created_at=row["created_at"],
+            account_email=row["account_email"] if "account_email" in row.keys() else None,
+            account_status=row["account_status"] if "account_status" in row.keys() else None,
+            account_usage=row["account_usage"] if "account_usage" in row.keys() else None,
+            account_limit=row["account_limit"] if "account_limit" in row.keys() else None,
+            account_checked_at=row["account_checked_at"] if "account_checked_at" in row.keys() else None,
         )
+
+    def update_token_account_info(
+        self,
+        token_id: int,
+        email: Optional[str] = None,
+        status: Optional[str] = None,
+        usage: Optional[float] = None,
+        limit: Optional[float] = None
+    ) -> bool:
+        """Update cached account info for a token."""
+        import time
+        with self._lock:
+            with self._get_conn() as conn:
+                conn.execute(
+                    """UPDATE tokens SET
+                       account_email = ?,
+                       account_status = ?,
+                       account_usage = ?,
+                       account_limit = ?,
+                       account_checked_at = ?
+                       WHERE id = ?""",
+                    (email, status, usage, limit, int(time.time()), token_id)
+                )
+                return conn.total_changes > 0
+
+    def get_token_credentials(self, token_id: int) -> Optional[dict]:
+        """
+        获取 token 的完整凭证信息（包括解密的 refresh_token/client_id/client_secret）。
+
+        用于创建 KiroAuthManager 实例。
+
+        Args:
+            token_id: Token ID
+
+        Returns:
+            dict with keys: refresh_token, auth_type, client_id, client_secret
+            Returns None if token not found
+        """
+        with self._lock:
+            with self._get_conn() as conn:
+                row = conn.execute(
+                    """SELECT refresh_token_encrypted, auth_type,
+                              client_id_encrypted, client_secret_encrypted
+                       FROM tokens WHERE id = ?""",
+                    (token_id,)
+                ).fetchone()
+
+                if not row:
+                    return None
+
+                refresh_token = self._decrypt_token(row["refresh_token_encrypted"])
+                auth_type = row["auth_type"] or "social"
+                client_id = None
+                client_secret = None
+
+                if auth_type == "idc" and row["client_id_encrypted"] and row["client_secret_encrypted"]:
+                    client_id = self._decrypt_token(row["client_id_encrypted"])
+                    client_secret = self._decrypt_token(row["client_secret_encrypted"])
+
+                return {
+                    "refresh_token": refresh_token,
+                    "auth_type": auth_type,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                }
 
     # ==================== API Key Methods ====================
 
