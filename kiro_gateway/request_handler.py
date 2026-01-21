@@ -453,12 +453,15 @@ class RequestHandler:
         thinking_param = getattr(request_data, 'thinking', None)
         thinking_enabled = _is_thinking_enabled(thinking_param)
         
+        # 获取 profile_arn
+        profile_arn = auth_manager.profile_arn or ""
+        
         # 构建 Kiro payload
         try:
             kiro_payload = build_kiro_payload(
                 openai_request,
                 conversation_id,
-                auth_manager.profile_arn or "",
+                profile_arn,
                 thinking_enabled=thinking_enabled
             )
         except ValueError as e:

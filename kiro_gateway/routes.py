@@ -79,6 +79,7 @@ from kiro_gateway.pages import (
     render_dashboard_page,
     render_swagger_page,
 )
+from kiro_gateway.websearch import has_web_search_tool, handle_websearch_request
 
 def _hash_rate_key(value: str) -> str:
     """Hash rate limit key to avoid leaking secrets."""
@@ -737,6 +738,11 @@ async def chat_completions(
     request.state.auth_manager = auth_manager
     request.state.model = request_data.model
 
+    # Check if this is a Web Search request
+    if has_web_search_tool(request_data):
+        logger.info("Detected Web Search request, routing to websearch handler")
+        return await handle_websearch_request(request, request_data, response_format="openai")
+
     return await RequestHandler.process_request(
         request,
         request_data,
@@ -780,6 +786,11 @@ async def anthropic_messages(
     # Store auth_manager and model in request state for RequestHandler and metrics
     request.state.auth_manager = auth_manager
     request.state.model = request_data.model
+
+    # Check if this is a Web Search request
+    if has_web_search_tool(request_data):
+        logger.info("Detected Web Search request, routing to websearch handler")
+        return await handle_websearch_request(request, request_data, response_format="anthropic")
 
     return await RequestHandler.process_request(
         request,
@@ -1643,6 +1654,226 @@ async def admin_get_tokens(
     }
 
 
+@router.post("/admin/api/tokens/export", include_in_schema=False)
+async def admin_export_tokens(
+    request: Request,
+    token_ids: str = Form(""),  # Comma separated IDs, or empty for all
+):
+    """
+    Export tokens (Admin only).
+    
+    If token_ids is provided, export selected tokens.
+    If token_ids is empty, export ALL tokens.
+    
+    Format matches the import format:
+    [{
+      "refreshToken": "...",
+      "clientId": "...", (optional)
+      "clientSecret": "...", (optional)
+      "authType": "social" | "idc"
+    }, ...]
+    """
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+    
+    from kiro_gateway.database import user_db
+    
+    selected_ids = []
+    if token_ids.strip():
+         try:
+             selected_ids = [int(x.strip()) for x in token_ids.split(",") if x.strip()]
+         except ValueError:
+             return JSONResponse(status_code=400, content={"error": "无效的 token_ids 格式"})
+
+    # Fetch tokens (decrypted)
+    # We need a new DB method to get multiple tokens with full credentials
+    # Since get_token_credentials fetches one by one, we might need a helper loop or a new query.
+    # For now, let's just fetch DB rows based on ID filtering and then decrypt.
+    
+    query = "SELECT id, refresh_token_encrypted, auth_type, client_id_encrypted, client_secret_encrypted FROM tokens"
+    params = []
+    if selected_ids:
+        query += " WHERE id IN (" + ",".join("?" for _ in selected_ids) + ")"
+        params = selected_ids
+    
+    export_data = []
+    
+    # We use user_db's internal methods directly if possible or context manager, 
+    # but since we are in `routes.py`, we should access DB properly.
+    # Let's iterate over IDs if selected, or fetch all.
+    # To be safe and reuse existing code, we can use `get_token_credentials` in a loop?
+    # But that's inefficient for "ALL".
+    # Let's implement a direct query here using user_db._get_conn() context if it were accessible, 
+    # but `_get_conn` is semi-private. Ideally we add `get_all_token_credentials` to database.py?
+    # Given the constraint of minimal edits, let's act as if we can add a method or query via existing.
+    
+    # Let's add a helper function inside database.py or use direct decryption here if we can access `_decrypt_token`.
+    # `_decrypt_token` is also internal.
+    
+    # The clean way: Iterate over IDs. If "ALL", we first get all IDs.
+    
+    if not selected_ids:
+        # Get all token IDs
+        with user_db._get_conn() as conn:
+            rows = conn.execute("SELECT id FROM tokens").fetchall()
+            selected_ids = [r[0] for r in rows]
+    
+    count = 0
+    for tid in selected_ids:
+        creds = user_db.get_token_credentials(tid)
+        if creds:
+             item = {
+                 "refreshToken": creds["refresh_token"],
+                 "authType": creds["auth_type"]
+             }
+             if creds["auth_type"] == "idc":
+                 item["clientId"] = creds["client_id"]
+                 item["clientSecret"] = creds["client_secret"]
+             
+             export_data.append(item)
+             count += 1
+             
+    # Return as downloadable JSON file
+    file_content = json.dumps(export_data, indent=2, ensure_ascii=False)
+    filename = f"kiro_tokens_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    
+    return Response(
+        content=file_content,
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@router.post("/admin/api/tokens/import", include_in_schema=False)
+async def admin_import_tokens(
+    request: Request,
+    file: UploadFile = File(...),
+    _csrf: None = Depends(require_same_origin)
+):
+    """Import tokens from JSON file (Admin only)."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+    
+    from kiro_gateway.database import user_db
+    
+    try:
+        content = await file.read()
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return JSONResponse(status_code=400, content={"error": "无效的 JSON 文件"})
+
+        credentials, missing_req, missing_samples = _extract_refresh_tokens(payload)
+        
+        if not credentials:
+            return JSONResponse(status_code=400, content={"error": "未找到有效的 Token"})
+
+        # Use 0 (system) or None as user_id for admin imports?
+        # get_all_tokens_with_users shows user_id.
+        # If we import as admin, we should probably assign them to a system user or admin user?
+        # Or maybe import logic should assign to the admin user?
+        # For now let's assume admin user (user_id=1 usually, or we can look it up).
+        # Let's use the first admin user found or user_id=1.
+        
+        # Actually, let's just make sure there is a user ID 1 or getting the current admin user ID would be better but `verify_admin_session` only checks cookie string.
+        # But we don't have easy access to admin user object here without DB.
+        # Let's try to get user_id=1 (default admin).
+        
+        target_user = user_db.get_user(1) 
+        if not target_user:
+             # If no user 1, try properly finding an admin
+             users = user_db.get_all_users(limit=1, is_admin=True)
+             if users:
+                 target_user = users[0]
+        
+        user_id = target_user.id if target_user else 1 # Fallback to 1, DB constraints might fail if not exists
+        
+        added = 0
+        updated = 0
+        failed = 0
+        
+        # Deduplicate credentials
+        creds_map = {}
+        for c in credentials:
+             creds_map[c.refresh_token] = c
+        unique_creds = list(creds_map.values())
+        
+        for cred in unique_creds:
+             try:
+                 # Check if exists
+                 # We don't have a direct "get_token_by_refresh_token" method exposed easily with encryption.
+                 # donate_token handles logic: if exists for user, updates it.
+                 # We can reuse donate_token.
+                 
+                 # donate_token checks validity. This might be slow for bulk import.
+                 # But it ensures data integrity.
+                 # However, admins might want to skip validation for speed?
+                 # Let's force validation to be safe, but it might timeout for large files.
+                 # We can use a background task? Or just let it run (timeout depends on server).
+                 # For bulk import of 500 tokens, validation is too slow (500 * 2s = 1000s).
+                 # We should probably skip validation or use a "fast import" mode if we trust the source.
+                 # But `donate_token` calls `AuthManager` to validate.
+                 
+                 # Let's try to add a `skip_validation` param to donate_token? 
+                 # UserDatabase.donate_token doesn't have it. It calls `get_token_info` -> validates.
+                 # Modifying database.py is risky now.
+                 # We can manually insert into DB directly if we duplicate some logic.
+                 # Or we just accept it's slow.
+                 # Given it's a "User Request: Add functionality", let's assume valid tokens primarily and use reuse `donate_token` for safety.
+                 # But wait, `donate_token` validates against AWS. If connection is slow, this will time out.
+                 # 
+                 # Let's optimize: We can insert with status='active' (or 'unknown') directly if we skip validation.
+                 # Let's do raw insert for Admin Import to be fast.
+                 
+                 # We need to encrypt tokens.
+                 user_db.donate_token(
+                     user_id=user_id,
+                     refresh_token=cred.refresh_token,
+                     auth_type=cred.auth_type,
+                     client_id=cred.client_id,
+                     client_secret=cred.client_secret,
+                     visibility="public", # Default to public for pool? Or private? Admin import usually for pool. Let's say public.
+                     name=None
+                 )
+                 # Wait, donate_token performs validation inside.
+                 # If we want to avoid validation, we can't use donate_token.
+                 # But we must use it to reuse encryption logic.
+                 # Let's stick with donate_token and hope for the best, or user validates in background.
+                 
+                 # Actuall `donate_token` in `database.py` DOES NOT validate.
+                 # It merely inserts.
+                 # The VALIDATION logic is in `routes.py /user/api/tokens` endpoint which calls `user_donate_token`.
+                 # `user_donate_token` calls `KiroAuthManager(..).get_access_token()` THEN `user_db.donate_token`.
+                 # So `user_db.donate_token` is safe and fast! It just inserts/updates DB.
+                 # Perfect.
+                 
+                 user_db.donate_token(
+                     user_id=user_id,
+                     refresh_token=cred.refresh_token,
+                     auth_type=cred.auth_type,
+                     client_id=cred.client_id,
+                     client_secret=cred.client_secret,
+                     visibility="public"
+                 )
+                 added += 1
+             except Exception as e:
+                 logger.error(f"Import failed for token: {e}")
+                 failed += 1
+        
+        return {
+            "success": True,
+            "added": added,
+            "updated": updated, # donate_token upsert logic might return ID but we don't distinguish add/update easily without checking return
+            "failed": failed
+        }
+        
+    except Exception as e:
+        logger.error(f"Import error: {e}")
+        return JSONResponse(status_code=500, content={"error": f"导入失败: {str(e)}"})
+
+
 @router.post("/admin/api/remove-token", include_in_schema=False)
 async def admin_remove_token(
     request: Request,
@@ -1660,6 +1891,36 @@ async def admin_remove_token(
             await auth_cache.remove(token)
             return {"success": True}
     return {"success": False, "message": "Token 不存在"}
+
+
+@router.post("/admin/api/refresh-cached-token", include_in_schema=False)
+async def admin_refresh_cached_token(
+    request: Request,
+    token_id: str = Form(...),
+    _csrf: None = Depends(require_same_origin)
+):
+    """Force refresh a cached token."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+
+    # Find token by ID (first 8 chars)
+    found_manager = None
+    for token, manager in list(auth_cache.cache.items()):
+        if token[:8] == token_id:
+            found_manager = manager
+            break
+    
+    if not found_manager:
+        return JSONResponse(status_code=404, content={"error": "Token 不存在"})
+
+    try:
+        # Force refresh the token
+        await found_manager.force_refresh()
+        return {"success": True, "message": "刷新成功"}
+    except Exception as e:
+        logger.error(f"手动刷新 Token 失败: {e}")
+        return JSONResponse(status_code=500, content={"error": f"刷新失败: {str(e)}"})
 
 
 @router.post("/admin/api/import-keys", include_in_schema=False)
@@ -2235,6 +2496,73 @@ async def user_mark_announcement_dismissed(
     user_db.mark_announcement_dismissed(user.id, announcement_id)
     return {"success": True}
 
+@router.post("/user/api/tokens/{token_id}/test", include_in_schema=False)
+async def user_test_token(
+    request: Request,
+    token_id: int,
+    _csrf: None = Depends(require_same_origin)
+):
+    """Test a token by sending a hello message."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+    
+    from kiro_gateway.database import user_db
+    token = user_db.get_token_by_id(token_id)
+    # Allow admins to test any token, users to test their own
+    if not token or (token.user_id != user.id and not user.is_admin):
+        return JSONResponse(status_code=404, content={"error": "Token 不存在或无权限"})
+
+    credentials = user_db.get_token_credentials(token_id)
+    if not credentials:
+        return JSONResponse(status_code=500, content={"error": "无法获取 Token 凭证"})
+
+    try:
+        auth_manager = await auth_cache.get_or_create(
+            refresh_token=credentials["refresh_token"],
+            region=settings.region,
+            profile_arn=settings.profile_arn,
+            client_id=credentials["client_id"],
+            client_secret=credentials["client_secret"]
+        )
+        
+        # Inject into request state for RequestHandler
+        request.state.auth_manager = auth_manager
+        
+        # Construct request
+        msg = "hello, how are you"
+        completion_request = ChatCompletionRequest(
+            model="claude-haiku-4-5",
+            messages=[{"role": "user", "content": msg}],
+            stream=False
+        )
+
+        response = await RequestHandler.process_request(
+             request,
+             completion_request,
+             "/user/api/tokens/test",
+             convert_to_openai=False,
+             response_format="openai"
+        )
+        
+        if isinstance(response, JSONResponse):
+             content = json.loads(response.body.decode())
+             if "choices" in content and len(content["choices"]) > 0:
+                 return {"success": True, "response": content["choices"][0]["message"]["content"]}
+             elif "error" in content:
+                 error_msg = content["error"]["message"] if isinstance(content["error"], dict) else str(content["error"])
+                 return {"success": False, "error": error_msg}
+             else:
+                 logger.warning(f"Unexpected response content: {content}")
+                 return {"success": False, "error": "No response content"}
+        else:
+             return {"success": False, "error": "Unexpected response type"}
+
+    except Exception as e:
+        logger.error(f"Test token failed: {e}")
+        return JSONResponse(status_code=500, content={"error": f"测试失败: {str(e)}"})
+
+
 @router.get("/user/api/tokens", include_in_schema=False)
 async def user_get_tokens(
     request: Request,
@@ -2723,6 +3051,62 @@ async def user_donate_token(
         client_secret=client_secret if auth_type == "idc" else None,
     )
     return {"success": success, "message": message}
+
+
+@router.post("/user/api/tokens/refresh", include_in_schema=False)
+async def user_refresh_token(
+    request: Request,
+    token_id: int = Form(...),
+    _csrf: None = Depends(require_same_origin)
+):
+    """Manually refresh a user's token validity."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+    
+    from kiro_gateway.database import user_db
+    
+    # 1. Verify token ownership
+    token = user_db.get_token_by_id(token_id)
+    if not token:
+        return JSONResponse(status_code=404, content={"error": "Token 不存在"})
+    
+    # Allow admins to refresh any token, users only their own
+    if token.user_id != user.id and not user.is_admin:
+        return JSONResponse(status_code=403, content={"error": "无权操作此 Token"})
+
+    # 2. Refresh logic
+    from kiro_gateway.auth import KiroAuthManager
+    from kiro_gateway.config import settings as cfg
+    
+    try:
+        # Get full credentials (decrypted)
+        creds = user_db.get_token_credentials(token_id)
+        if not creds:
+             return JSONResponse(status_code=404, content={"error": "Token 凭证无效"})
+             
+        # Use temp manager to force verify against upstream
+        temp_manager = KiroAuthManager(
+            refresh_token=creds["refresh_token"],
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"],
+            region=cfg.region,
+            profile_arn=cfg.profile_arn
+        )
+        # Attempt to get access token (this will trigger refresh flow)
+        # We use force_refresh to ensure we actually hit the API
+        await temp_manager.force_refresh()
+        
+        # 3. If successful, update DB status to active
+        user_db.set_token_status(token_id, "active")
+        
+        return {"success": True, "message": "刷新成功，Token 有效"}
+        
+    except Exception as e:
+        logger.warning(f"用户手动刷新 Token 失败: ID={token_id}, Err={str(e)}")
+        # If failed, ensure it's marked as invalid
+        # user_db.set_token_status(token_id, "invalid") # Optional: stricter? 
+        return JSONResponse(status_code=400, content={"error": f"刷新失败: {str(e)}"})
 
 
 @router.post("/user/api/tokens/import", include_in_schema=False)

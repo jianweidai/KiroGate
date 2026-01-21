@@ -2451,6 +2451,9 @@ def render_admin_page() -> str:
               <option value="20" selected>20/页</option>
               <option value="50">50/页</option>
             </select>
+            <button onclick="triggerImportTokens()" class="btn text-sm" style="background: var(--bg-input); border: 1px solid var(--border);">导入 Token</button>
+            <input type="file" id="adminTokenImportFile" accept=".json" style="display: none;" onchange="importTokensAdmin(this)" />
+            <button onclick="exportSelectedTokens()" class="btn text-sm" style="background: var(--bg-input); border: 1px solid var(--border);">导出 Token</button>
             <button onclick="batchDeletePoolTokens()" class="btn btn-danger text-sm">批量删除</button>
             <button onclick="refreshDonatedTokens()" class="btn btn-primary text-sm">刷新</button>
           </div>
@@ -2606,6 +2609,7 @@ def render_admin_page() -> str:
               <option value="20" selected>20/页</option>
               <option value="50">50/页</option>
             </select>
+            <button onclick="exportSelectedTokens()" class="btn text-sm" style="background: var(--bg-input); border: 1px solid var(--border);">导出 Token</button>
             <button onclick="refreshTokenList()" class="btn btn-primary text-sm">刷新</button>
             <button onclick="batchRemoveTokens()" class="btn btn-danger text-sm">批量移除</button>
           </div>
@@ -3618,6 +3622,7 @@ def render_admin_page() -> str:
           <td class="py-3 px-3 font-mono">${{t.masked_token}}</td>
           <td class="py-3 px-3">${{t.has_access_token ? '<span class="text-green-400">已认证</span>' : '<span class="text-yellow-400">待认证</span>'}}</td>
           <td class="py-3 px-3">
+            <button onclick="refreshSingleToken('${{t.token_id}}')" class="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 mr-2">刷新</button>
             <button onclick="removeToken('${{t.token_id}}')" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30">移除</button>
           </td>
         </tr>
@@ -3655,6 +3660,26 @@ def render_admin_page() -> str:
       pages.innerHTML = html;
     }}
 
+    async function refreshSingleToken(tokenId) {{
+      if (!confirm('确定要手动刷新此 Token 吗？')) return;
+      const fd = new FormData();
+      fd.append('token_id', tokenId);
+      try {{
+        const r = await fetch('/admin/api/refresh-cached-token', {{ method: 'POST', body: fd }});
+        const d = await r.json();
+        if (r.ok) {{
+          alert('刷新成功');
+          refreshTokenList();
+          refreshStats();
+        }} else {{
+          alert(d.error || '刷新失败');
+        }}
+      }} catch (e) {{
+        console.error(e);
+        alert('请求失败');
+      }}
+    }}
+
     async function removeToken(tokenId) {{
       if (!confirm('确定要移除此 Token 吗？用户需要重新认证。')) return;
       const fd = new FormData();
@@ -3684,7 +3709,66 @@ def render_admin_page() -> str:
       alert('批量移除完成');
     }}
 
-    // 用户列表数据和状态
+    async function exportSelectedTokens() {{
+      // 检查当前是否在 Donated Tokens 标签页
+      // 由于这是全局函数，我们优先检查 selectedPoolTokens (来自 Donated Tokens 表格)
+      // 如果 selectedPoolTokens 有值，说明用户在操作该表格。
+      
+      let ids = [];
+      if (typeof selectedPoolTokens !== 'undefined' && selectedPoolTokens.size > 0) {{
+        ids = Array.from(selectedPoolTokens);
+      }}
+      
+      // 如果没有选中，询问是否导出全部
+      if (ids.length === 0) {{
+        if (!confirm('未选择任何 Token，确认要导出全部 Token 吗？')) {{
+          return;
+        }}
+      }}
+      
+      // 创建隐藏表单提交
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '/admin/api/tokens/export';
+      form.style.display = 'none';
+      
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'token_ids';
+      input.value = ids.join(',');
+      form.appendChild(input);
+      
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+    }}
+
+    async function triggerImportTokens() {{
+        document.getElementById('adminTokenImportFile').click();
+    }}
+
+    async function importTokensAdmin(input) {{
+        if (!input.files || !input.files[0]) return;
+        const file = input.files[0];
+        
+        const fd = new FormData();
+        fd.append('file', file);
+        
+        try {{
+            const r = await fetch('/admin/api/tokens/import', {{ method: 'POST', body: fd }});
+            const d = await r.json();
+            if (r.ok && d.success) {{
+                alert(`导入成功！\\n新增: ${{d.added}}\\n更新: ${{d.updated}}\\n失败: ${{d.failed}}`);
+                refreshDonatedTokens();
+            }} else {{
+                alert('导入失败: ' + (d.error || '未知错误'));
+            }}
+        }} catch (e) {{
+            console.error(e);
+            alert('导入发生错误');
+        }}
+        input.value = ''; // 重置以允许再次上传相同文件
+    }}
     let allUsers = [];
     let usersCurrentPage = 1;
     let usersSortField = 'id';
@@ -4833,6 +4917,119 @@ def render_user_page(user) -> str:
       }} catch (e) {{ console.error(e); }}
     }}
 
+    async function userRefreshToken(tokenId) {{
+      const confirmed = await showConfirmModal({{
+        title: '刷新 Token',
+        message: '确定要手动刷新此 Token 吗？我们将尝试请求 AWS 验证其有效性。',
+        icon: '🔄',
+        confirmText: '验证刷新',
+        danger: false
+      }});
+      if (!confirmed) return;
+
+      const fd = new FormData();
+      fd.append('token_id', tokenId);
+      try {{
+        const r = await fetch('/user/api/tokens/refresh', {{ method: 'POST', body: fd }});
+        const d = await r.json();
+        if (r.ok) {{
+          showConfirmModal({{
+            title: '成功',
+            message: '刷新成功，Token 状态已更新。',
+            icon: '✅',
+            confirmText: '好的',
+            danger: false
+          }});
+          loadTokens();
+        }} else {{
+          showConfirmModal({{
+            title: '刷新失败',
+            message: d.error || '请求失败',
+            icon: '❌',
+            confirmText: '关闭',
+            danger: true
+          }});
+        }}
+      }} catch (e) {{
+        console.error(e);
+        showConfirmModal({{
+          title: '错误',
+          message: '请求发生错误',
+          icon: '❌',
+          confirmText: '关闭',
+          danger: true
+        }});
+      }}
+    }}
+
+    async function testToken(tokenId) {{
+      const confirmed = await showConfirmModal({{
+        title: '测试 Token',
+        message: '确定要测试此 Token 吗？这将发送一条消息到模型以验证连通性。',
+        icon: '🧪',
+        confirmText: '开始测试',
+        danger: false
+      }});
+      if (!confirmed) return;
+
+      // Show loading state
+      const modal = document.getElementById('confirmModal');
+      const icon = document.getElementById('confirmIcon');
+      const title = document.getElementById('confirmTitle');
+      const msg = document.getElementById('confirmMessage');
+      const btn = document.getElementById('confirmBtn');
+      const cancelBtn = modal.querySelector('button.text-gray-400') || modal.querySelectorAll('button')[0]; 
+      
+      // Store original cancel button display
+      const originalCancelDisplay = cancelBtn ? cancelBtn.style.display : '';
+
+      icon.innerHTML = '<svg class="animate-spin h-10 w-10 text-indigo-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+      title.textContent = '测试中...';
+      msg.textContent = '正在与 AWS 模型建立连接，请稍候。';
+      btn.style.display = 'none';
+      if (cancelBtn) cancelBtn.style.display = 'none';
+      modal.style.display = 'flex';
+
+      try {{
+        const r = await fetch('/user/api/tokens/' + tokenId + '/test', {{ method: 'POST' }});
+        const d = await r.json();
+        
+        // Restore buttons display for next use
+        btn.style.display = '';
+        if (cancelBtn) cancelBtn.style.display = originalCancelDisplay;
+        // Icon content will be reset by showConfirmModal
+
+        if (r.ok && d.success) {{
+          showConfirmModal({{
+            title: '测试成功',
+            message: '模型回复: ' + d.response,
+            icon: '✅',
+            confirmText: '太棒了',
+            danger: false
+          }});
+        }} else {{
+          showConfirmModal({{
+            title: '测试失败',
+            message: d.error || '请求失败',
+            icon: '❌',
+            confirmText: '关闭',
+            danger: true
+          }});
+        }}
+      }} catch (e) {{
+        console.error(e);
+        btn.style.display = '';
+        if (cancelBtn) cancelBtn.style.display = originalCancelDisplay;
+        showConfirmModal({{
+          title: '错误',
+          message: '请求发生错误: ' + e.message,
+          icon: '❌',
+          confirmText: '关闭',
+          danger: true
+        }});
+      }}
+    }}
+
     async function refreshTokens() {{
       await loadTokens();
     }}
@@ -4885,7 +5082,9 @@ def render_user_page(user) -> str:
             <td class="py-3 px-3">${{formatSuccessRate(t.success_rate)}}</td>
             <td class="py-3 px-3">${{t.last_used ? new Date(t.last_used).toLocaleString() : '-'}}</td>
             <td class="py-3 px-3">
-              ${{toggleBtn}}
+              ${toggleBtn}
+              <button onclick="userRefreshToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-teal-500/20 text-teal-400 hover:bg-teal-500/30 mr-1">验证</button>
+              <button onclick="testToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 mr-1">测试</button>
               <button onclick="deleteToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
             </td>
           </tr>

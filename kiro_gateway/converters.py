@@ -543,6 +543,7 @@ def build_kiro_payload(
     merged_messages = merge_adjacent_messages(non_system_messages)
     
     if not merged_messages:
+        logger.error("[build_kiro_payload] 错误：没有可发送的消息")
         raise ValueError("没有可发送的消息")
     
     # Получаем внутренний ID модели
@@ -576,9 +577,11 @@ def build_kiro_payload(
                 "content": current_content
             }
         })
+        # 使用 "Continue" 让模型继续生成
+        # 注意：Kiro API 不接受空的 content
         current_content = "Continue"
     
-    # 如果内容为空
+    # 如果内容为空，使用 "Continue"
     if not current_content:
         current_content = "Continue"
     
