@@ -410,7 +410,8 @@ class RequestHandler:
         request_data: Union[ChatCompletionRequest, AnthropicMessagesRequest],
         endpoint_name: str,
         convert_to_openai: bool = False,
-        response_format: str = "openai"
+        response_format: str = "openai",
+        buffered_mode: bool = False
     ) -> Union[StreamingResponse, JSONResponse]:
         """
         处理请求的核心逻辑。
@@ -421,6 +422,7 @@ class RequestHandler:
             endpoint_name: 端点名称
             convert_to_openai: 是否需要将 Anthropic 请求转换为 OpenAI 格式
             response_format: 响应格式（"openai" 或 "anthropic"）
+            buffered_mode: 是否启用缓冲模式（仅对 Anthropic 流式响应有效）
 
         Returns:
             StreamingResponse 或 JSONResponse
@@ -519,18 +521,34 @@ class RequestHandler:
             # 根据请求类型和响应格式处理
             if request_data.stream:
                 if response_format == "anthropic":
-                    return await RequestHandler.create_stream_response(
-                        http_client,
-                        response,
-                        request_data.model,
-                        model_cache,
-                        auth_manager,
-                        stream_kiro_to_anthropic,
-                        endpoint_name,
-                        messages_for_tokenizer,
-                        tools_for_tokenizer,
-                        thinking_enabled=thinking_enabled  # 使用已计算的 thinking_enabled
-                    )
+                    # 如果启用缓冲模式，使用缓冲流处理器
+                    if buffered_mode:
+                        from kiro_gateway.buffered_streaming import stream_kiro_to_anthropic_buffered
+                        return await RequestHandler.create_stream_response(
+                            http_client,
+                            response,
+                            request_data.model,
+                            model_cache,
+                            auth_manager,
+                            stream_kiro_to_anthropic_buffered,
+                            endpoint_name,
+                            messages_for_tokenizer,
+                            tools_for_tokenizer,
+                            thinking_enabled=thinking_enabled
+                        )
+                    else:
+                        return await RequestHandler.create_stream_response(
+                            http_client,
+                            response,
+                            request_data.model,
+                            model_cache,
+                            auth_manager,
+                            stream_kiro_to_anthropic,
+                            endpoint_name,
+                            messages_for_tokenizer,
+                            tools_for_tokenizer,
+                            thinking_enabled=thinking_enabled  # 使用已计算的 thinking_enabled
+                        )
                 else:
                     return await RequestHandler.create_stream_response(
                         http_client,

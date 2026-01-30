@@ -797,7 +797,78 @@ async def anthropic_messages(
         request_data,
         "/v1/messages",
         convert_to_openai=True,
-        response_format="anthropic"
+        response_format="anthropic",
+        buffered_mode=True  # 默认使用缓冲模式以提供准确的 input_tokens
+    )
+
+
+# Claude Code Compatible Endpoint (/cc/v1/messages) - Buffered Mode
+# ==================================================================================================
+
+@router.post("/cc/v1/messages")
+@rate_limit_decorator()
+async def anthropic_messages_buffered(
+    request: Request,
+    request_data: AnthropicMessagesRequest,
+    auth_manager: KiroAuthManager = Depends(verify_anthropic_api_key)
+):
+    """
+    Claude Code compatible endpoint with buffered streaming mode.
+    
+    This endpoint differs from /v1/messages in that:
+    - Streaming responses wait for the entire upstream response before sending
+    - message_start contains accurate input_tokens from contextUsageEvent
+    - Sends ping keepalive every 25 seconds during buffering
+    
+    This ensures accurate token counting for Claude Code CLI and other clients
+    that rely on precise input_tokens for billing and quota management.
+    
+    Args:
+        request: FastAPI Request for accessing app.state
+        request_data: Anthropic MessagesRequest format
+        auth_manager: KiroAuthManager instance (from verify_anthropic_api_key)
+    
+    Returns:
+        StreamingResponse for streaming mode (buffered)
+        JSONResponse for non-streaming mode (same as /v1/messages)
+    
+    Raises:
+        HTTPException: On validation or API errors
+    """
+    logger.info(
+        f"[{get_timestamp()}] 收到 /cc/v1/messages 请求 (缓冲模式) "
+        f"(模型={request_data.model}, 流式={request_data.stream})"
+    )
+    
+    # Store auth_manager and model in request state
+    request.state.auth_manager = auth_manager
+    request.state.model = request_data.model
+    
+    # Check if this is a Web Search request
+    if has_web_search_tool(request_data):
+        logger.info("Detected Web Search request, routing to websearch handler")
+        return await handle_websearch_request(request, request_data, response_format="anthropic")
+    
+    # For non-streaming mode, use standard handler (no buffering needed)
+    if not request_data.stream:
+        logger.debug("Non-streaming request, using standard handler")
+        return await RequestHandler.process_request(
+            request,
+            request_data,
+            "/cc/v1/messages",
+            convert_to_openai=True,
+            response_format="anthropic"
+        )
+    
+    # For streaming mode, use buffered handler
+    logger.debug("Streaming request, using buffered handler")
+    return await RequestHandler.process_request(
+        request,
+        request_data,
+        "/cc/v1/messages",
+        convert_to_openai=True,
+        response_format="anthropic",
+        buffered_mode=True  # Enable buffered streaming
     )
 
 
