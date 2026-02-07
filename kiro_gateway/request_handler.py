@@ -559,7 +559,8 @@ class RequestHandler:
                         stream_kiro_to_openai,
                         endpoint_name,
                         messages_for_tokenizer,
-                        tools_for_tokenizer
+                        tools_for_tokenizer,
+                        thinking_enabled=thinking_enabled
                     )
             else:
                 if response_format == "anthropic":
@@ -584,7 +585,8 @@ class RequestHandler:
                         collect_stream_response,
                         endpoint_name,
                         messages_for_tokenizer,
-                        tools_for_tokenizer
+                        tools_for_tokenizer,
+                        thinking_enabled=thinking_enabled
                     )
 
         except HTTPException as e:

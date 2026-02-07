@@ -388,7 +388,8 @@ async def stream_kiro_to_openai_internal(
     first_token_timeout: float = settings.first_token_timeout,
     stream_read_timeout: float = settings.stream_read_timeout,
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    thinking_enabled: bool = False
 ) -> AsyncGenerator[str, None]:
     """
     Internal generator for converting Kiro stream to OpenAI format.
@@ -409,6 +410,7 @@ async def stream_kiro_to_openai_internal(
         stream_read_timeout: Stream read timeout for subsequent chunks (seconds)
         request_messages: Original request messages (for fallback token counting)
         request_tools: Original request tools (for fallback token counting)
+        thinking_enabled: Enable thinking tag parsing (converts to reasoning_content)
 
     Yields:
         Strings in SSE format: "data: {...}\\n\\n" or "data: [DONE]\\n\\n"
@@ -425,6 +427,9 @@ async def stream_kiro_to_openai_internal(
     metering_data = None
     context_usage_percentage = None
     content_parts: list[str] = []  # 使用 list 替代字符串拼接，提升性能
+
+    # Thinking 解析器（仅在 thinking_enabled 时使用）
+    thinking_parser = KiroThinkingTagParser() if thinking_enabled else None
 
     # 根据模型自适应调整超时时间
     adaptive_first_token_timeout = get_adaptive_timeout(model, first_token_timeout)
@@ -457,25 +462,49 @@ async def stream_kiro_to_openai_internal(
                 content = event["data"]
                 content_parts.append(content)
 
-                delta = {"content": content}
-                if first_chunk:
-                    delta["role"] = "assistant"
-                    first_chunk = False
+                if thinking_enabled and thinking_parser:
+                    segments = thinking_parser.push_and_parse(content)
+                    for segment in segments:
+                        delta = {}
+                        if segment.type == SegmentType.THINKING:
+                            delta["reasoning_content"] = segment.content
+                        else:
+                            delta["content"] = segment.content
+                        if first_chunk:
+                            delta["role"] = "assistant"
+                            first_chunk = False
 
-                openai_chunk = {
-                    "id": completion_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": model,
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
-                }
+                        openai_chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_time,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+                        }
+                        chunk_text = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                        if debug_logger:
+                            debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
+                        yield chunk_text
+                else:
+                    delta = {"content": content}
+                    if first_chunk:
+                        delta["role"] = "assistant"
+                        first_chunk = False
 
-                chunk_text = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                    openai_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_time,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+                    }
 
-                if debug_logger:
-                    debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
+                    chunk_text = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
-                yield chunk_text
+                    if debug_logger:
+                        debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
+
+                    yield chunk_text
 
             elif event["type"] == "usage":
                 metering_data = event["data"]
@@ -517,31 +546,80 @@ async def stream_kiro_to_openai_internal(
                     content = event["data"]
                     content_parts.append(content)
 
-                    delta = {"content": content}
-                    if first_chunk:
-                        delta["role"] = "assistant"
-                        first_chunk = False
+                    if thinking_enabled and thinking_parser:
+                        segments = thinking_parser.push_and_parse(content)
+                        for segment in segments:
+                            delta = {}
+                            if segment.type == SegmentType.THINKING:
+                                delta["reasoning_content"] = segment.content
+                            else:
+                                delta["content"] = segment.content
+                            if first_chunk:
+                                delta["role"] = "assistant"
+                                first_chunk = False
 
-                    openai_chunk = {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created_time,
-                        "model": model,
-                        "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
-                    }
+                            openai_chunk = {
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_time,
+                                "model": model,
+                                "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+                            }
+                            chunk_text = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                            if debug_logger:
+                                debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
+                            yield chunk_text
+                    else:
+                        delta = {"content": content}
+                        if first_chunk:
+                            delta["role"] = "assistant"
+                            first_chunk = False
 
-                    chunk_text = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                        openai_chunk = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_time,
+                            "model": model,
+                            "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+                        }
 
-                    if debug_logger:
-                        debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
+                        chunk_text = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
 
-                    yield chunk_text
+                        if debug_logger:
+                            debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
+
+                        yield chunk_text
 
                 elif event["type"] == "usage":
                     metering_data = event["data"]
 
                 elif event["type"] == "context_usage":
                     context_usage_percentage = event["data"]
+
+        # 流结束，刷新 thinking 解析器缓冲区
+        if thinking_enabled and thinking_parser:
+            final_segments = thinking_parser.flush()
+            for segment in final_segments:
+                delta = {}
+                if segment.type == SegmentType.THINKING:
+                    delta["reasoning_content"] = segment.content
+                else:
+                    delta["content"] = segment.content
+                if first_chunk:
+                    delta["role"] = "assistant"
+                    first_chunk = False
+
+                openai_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
+                }
+                chunk_text = f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                if debug_logger:
+                    debug_logger.log_modified_chunk(chunk_text.encode('utf-8'))
+                yield chunk_text
 
         # 合并 content 部分（比字符串拼接更高效）
         full_content = ''.join(content_parts)
@@ -622,7 +700,8 @@ async def stream_kiro_to_openai(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    thinking_enabled: bool = False
 ) -> AsyncGenerator[str, None]:
     """
     Генератор для преобразования потока Kiro в OpenAI формат.
@@ -638,6 +717,7 @@ async def stream_kiro_to_openai(
         auth_manager: Менеджер аутентификации
         request_messages: Исходные сообщения запроса (для fallback подсчёта токенов)
         request_tools: Исходные инструменты запроса (для fallback подсчёта токенов)
+        thinking_enabled: Включен ли режим thinking
     
     Yields:
         Строки в формате SSE: "data: {...}\\n\\n" или "data: [DONE]\\n\\n"
@@ -645,7 +725,8 @@ async def stream_kiro_to_openai(
     async for chunk in stream_kiro_to_openai_internal(
         client, response, model, model_cache, auth_manager,
         request_messages=request_messages,
-        request_tools=request_tools
+        request_tools=request_tools,
+        thinking_enabled=thinking_enabled
     ):
         yield chunk
 
@@ -659,7 +740,8 @@ async def stream_with_first_token_retry(
     max_retries: int = settings.first_token_max_retries,
     first_token_timeout: float = settings.first_token_timeout,
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    thinking_enabled: bool = False
 ) -> AsyncGenerator[str, None]:
     """
     Streaming с автоматическим retry при таймауте первого токена.
@@ -680,6 +762,7 @@ async def stream_with_first_token_retry(
         first_token_timeout: Таймаут ожидания первого токена (секунды)
         request_messages: Исходные сообщения запроса (для fallback подсчёта токенов)
         request_tools: Исходные инструменты запроса (для fallback подсчёта токенов)
+        thinking_enabled: Включен ли режим thinking
     
     Yields:
         Строки в формате SSE
@@ -732,7 +815,8 @@ async def stream_with_first_token_retry(
                 auth_manager,
                 first_token_timeout=first_token_timeout,
                 request_messages=request_messages,
-                request_tools=request_tools
+                request_tools=request_tools,
+                thinking_enabled=thinking_enabled
             ):
                 yield chunk
             
@@ -778,14 +862,18 @@ async def collect_stream_response(
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    thinking_enabled: bool = False
 ) -> dict:
     """
     Собирает полный ответ из streaming потока.
-    
+
     Используется для non-streaming режима - собирает все chunks
     и формирует единый ответ.
-    
+
+    当 thinking_enabled=True 时，会从流式 delta 中收集 reasoning_content，
+    并在最终响应的 message 中添加 reasoning_content 字段。
+
     Args:
         client: HTTP клиент
         response: HTTP ответ с потоком
@@ -794,11 +882,13 @@ async def collect_stream_response(
         auth_manager: Менеджер аутентификации
         request_messages: Исходные сообщения запроса (для fallback подсчёта токенов)
         request_tools: Исходные инструменты запроса (для fallback подсчёта токенов)
-    
+        thinking_enabled: Включен ли режим thinking
+
     Returns:
         Словарь с полным ответом в формате OpenAI chat.completion
     """
     content_parts: list[str] = []  # 使用 list 替代字符串拼接，提升性能
+    reasoning_parts: list[str] = []  # thinking/reasoning 内容
     final_usage = None
     tool_calls = []
     completion_id = generate_completion_id()
@@ -810,29 +900,32 @@ async def collect_stream_response(
         model_cache,
         auth_manager,
         request_messages=request_messages,
-        request_tools=request_tools
+        request_tools=request_tools,
+        thinking_enabled=thinking_enabled
     ):
         if not chunk_str.startswith("data:"):
             continue
-        
+
         data_str = chunk_str[len("data:"):].strip()
         if not data_str or data_str == "[DONE]":
             continue
-        
+
         try:
             chunk_data = json.loads(data_str)
-            
+
             # Извлекаем данные из chunk
             delta = chunk_data.get("choices", [{}])[0].get("delta", {})
             if "content" in delta:
                 content_parts.append(delta["content"])
+            if "reasoning_content" in delta:
+                reasoning_parts.append(delta["reasoning_content"])
             if "tool_calls" in delta:
                 tool_calls.extend(delta["tool_calls"])
-            
+
             # Сохраняем usage из последнего chunk
             if "usage" in chunk_data:
                 final_usage = chunk_data["usage"]
-                
+
         except (json.JSONDecodeError, IndexError):
             continue
 
@@ -841,6 +934,12 @@ async def collect_stream_response(
 
     # Формируем финальный ответ
     message = {"role": "assistant", "content": full_content}
+
+    # 添加 reasoning_content（如果有）
+    full_reasoning = ''.join(reasoning_parts)
+    if full_reasoning:
+        message["reasoning_content"] = full_reasoning
+
     if tool_calls:
         # Для non-streaming ответа удаляем поле index из tool_calls,
         # так как оно требуется только для streaming chunks
@@ -858,14 +957,14 @@ async def collect_stream_response(
             }
             cleaned_tool_calls.append(cleaned_tc)
         message["tool_calls"] = cleaned_tool_calls
-    
+
     finish_reason = "tool_calls" if tool_calls else "stop"
-    
+
     # Формируем usage для ответа
     usage = final_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    
+
     # Логируем информацию о токенах для отладки (non-streaming использует те же логи из streaming)
-    
+
     return {
         "id": completion_id,
         "object": "chat.completion",
