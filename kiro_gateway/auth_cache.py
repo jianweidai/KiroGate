@@ -82,33 +82,37 @@ class AuthManagerCache:
         Returns:
             KiroAuthManager instance for the refresh token
         """
+        actual_region = region or settings.region
+        # 使用 refresh_token + region 作为缓存 key，确保不同 region 的 token 不会混淆
+        cache_key = f"{refresh_token}:{actual_region}"
+        
         async with self.lock:
             # Check if already cached
-            if refresh_token in self.cache:
+            if cache_key in self.cache:
                 # Move to end (most recently used)
-                self.cache.move_to_end(refresh_token)
-                logger.debug(f"AuthManager cache hit for token: {self._mask_token(refresh_token)}")
-                return self.cache[refresh_token]
+                self.cache.move_to_end(cache_key)
+                logger.debug(f"AuthManager cache hit for token: {self._mask_token(refresh_token)}, region: {actual_region}")
+                return self.cache[cache_key]
 
             # Create new AuthManager with IDC support
-            logger.info(f"Creating new AuthManager for token: {self._mask_token(refresh_token)}")
+            logger.info(f"Creating new AuthManager for token: {self._mask_token(refresh_token)}, region: {actual_region}")
             auth_manager = KiroAuthManager(
                 refresh_token=refresh_token,
-                region=region or settings.region,
+                region=actual_region,
                 profile_arn=profile_arn or settings.profile_arn,
                 client_id=client_id,
                 client_secret=client_secret,
             )
+            logger.info(f"AuthManager created with api_host: {auth_manager.api_host}")
 
             # Add to cache
-            self.cache[refresh_token] = auth_manager
+            self.cache[cache_key] = auth_manager
 
             # Evict oldest if cache is full
             if len(self.cache) > self.max_size:
-                oldest_token, oldest_manager = self.cache.popitem(last=False)
+                oldest_key, oldest_manager = self.cache.popitem(last=False)
                 logger.info(
-                    f"AuthManager cache full, evicted oldest token: "
-                    f"{self._mask_token(oldest_token)}"
+                    f"AuthManager cache full, evicted oldest: {oldest_key[:20]}..."
                 )
 
             logger.debug(f"AuthManager cache size: {len(self.cache)}/{self.max_size}")
@@ -121,22 +125,35 @@ class AuthManagerCache:
             self.cache.clear()
             logger.info(f"AuthManager cache cleared, removed {count} instances")
 
-    async def remove(self, refresh_token: str) -> bool:
+    async def remove(self, refresh_token: str, region: Optional[str] = None) -> bool:
         """
         Remove specific AuthManager from cache.
 
         Args:
             refresh_token: Refresh token to remove
+            region: AWS region (if None, removes all regions for this token)
 
         Returns:
             True if removed, False if not found
         """
         async with self.lock:
-            if refresh_token in self.cache:
-                del self.cache[refresh_token]
-                logger.info(f"Removed AuthManager from cache: {self._mask_token(refresh_token)}")
-                return True
-            return False
+            if region:
+                # Remove specific region
+                cache_key = f"{refresh_token}:{region}"
+                if cache_key in self.cache:
+                    del self.cache[cache_key]
+                    logger.info(f"Removed AuthManager from cache: {self._mask_token(refresh_token)}, region: {region}")
+                    return True
+                return False
+            else:
+                # Remove all regions for this token
+                keys_to_remove = [k for k in self.cache.keys() if k.startswith(f"{refresh_token}:")]
+                for key in keys_to_remove:
+                    del self.cache[key]
+                if keys_to_remove:
+                    logger.info(f"Removed {len(keys_to_remove)} AuthManager(s) from cache for token: {self._mask_token(refresh_token)}")
+                    return True
+                return False
 
     def _mask_token(self, token: str) -> str:
         """

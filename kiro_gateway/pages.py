@@ -2485,6 +2485,7 @@ def render_admin_page() -> str:
                 </th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortPoolTokens('id')">ID ↕</th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortPoolTokens('username')">所有者 ↕</th>
+                <th class="text-left py-3 px-3">区域</th>
                 <th class="text-left py-3 px-3">可见性</th>
                 <th class="text-left py-3 px-3">状态</th>
                 <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortPoolTokens('success_rate')">成功率 ↕</th>
@@ -2494,7 +2495,7 @@ def render_admin_page() -> str:
               </tr>
             </thead>
             <tbody id="donatedTokensTable">
-              <tr><td colspan="9" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+              <tr><td colspan="10" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
             </tbody>
           </table>
         </div>
@@ -4081,11 +4082,12 @@ def render_admin_page() -> str:
     function renderPoolTable(tokens) {{
       const tb = document.getElementById('donatedTokensTable');
       if (!tokens.length) {{
-        tb.innerHTML = '<tr><td colspan="9" class="py-6 text-center" style="color: var(--text-muted);">暂无添加 Token</td></tr>';
+        tb.innerHTML = '<tr><td colspan="10" class="py-6 text-center" style="color: var(--text-muted);">暂无添加 Token</td></tr>';
         return;
       }}
       tb.innerHTML = tokens.map(t => {{
         const username = escapeHtml(t.username || '未知');
+        const region = escapeHtml(t.region || 'us-east-1');
         return `
         <tr class="table-row">
           <td class="py-3 px-3">
@@ -4093,6 +4095,7 @@ def render_admin_page() -> str:
           </td>
           <td class="py-3 px-3">#${{t.id}}</td>
           <td class="py-3 px-3">${{username}}</td>
+          <td class="py-3 px-3"><span class="font-mono text-xs">${{region}}</span></td>
           <td class="py-3 px-3">${{t.visibility === 'public' ? '<span class="text-green-400">公开</span>' : '<span class="text-blue-400">私有</span>'}}</td>
           <td class="py-3 px-3">${{renderTokenStatus(t.status)}}</td>
           <td class="py-3 px-3">${{formatSuccessRate(t.success_rate, 1)}}</td>
@@ -4358,6 +4361,7 @@ def render_user_page(user) -> str:
                     <input type="checkbox" id="selectAllTokens" onchange="toggleAllTokens(this.checked)" class="cursor-pointer">
                   </th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('id')">ID ↕</th>
+                  <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('region')">区域 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('visibility')">可见性 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('status')">状态 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('success_rate')">成功率 ↕</th>
@@ -4366,7 +4370,7 @@ def render_user_page(user) -> str:
                 </tr>
               </thead>
               <tbody id="tokenTable">
-                <tr><td colspan="7" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+                <tr><td colspan="8" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
               </tbody>
             </table>
           </div>
@@ -4526,6 +4530,17 @@ def render_user_page(user) -> str:
             <p class="text-xs mt-0.5" style="color: var(--text-muted);">不显示您的用户名</p>
           </div>
         </label>
+      </div>
+
+      <!-- 区域选择 -->
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-2 block">🌍 AWS 区域</label>
+        <select id="donateRegion" class="w-full px-3 py-2 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border);">
+          <option value="us-east-1" selected>us-east-1 (美国东部)</option>
+          <option value="ap-southeast-1">ap-southeast-1 (新加坡)</option>
+          <option value="eu-west-1">eu-west-1 (爱尔兰)</option>
+        </select>
+        <p class="text-xs mt-1" style="color: var(--text-muted);">💡 选择您的 Kiro 账号所在区域</p>
       </div>
 
       <input type="hidden" id="donateVisibility" value="private">
@@ -5059,7 +5074,7 @@ def render_user_page(user) -> str:
     function renderTokenTable(tokens) {{
       const tb = document.getElementById('tokenTable');
       if (!tokens || !tokens.length) {{
-        tb.innerHTML = '<tr><td colspan="7" class="py-8 text-center" style="color: var(--text-muted);"><div class="mb-3">还没有 Token，先添加一个吧</div><button type="button" onclick="showDonateModal()" class="btn-primary text-sm px-3 py-1.5">+ 添加 Token</button></td></tr>';
+        tb.innerHTML = '<tr><td colspan="8" class="py-8 text-center" style="color: var(--text-muted);"><div class="mb-3">还没有 Token，先添加一个吧</div><button type="button" onclick="showDonateModal()" class="btn-primary text-sm px-3 py-1.5">+ 添加 Token</button></td></tr>';
         document.getElementById('tokensPagination').style.display = 'none';
         document.getElementById('selectAllTokens').checked = false;
         return;
@@ -5071,12 +5086,17 @@ def render_user_page(user) -> str:
         const toggleBtn = canToggle
           ? `<button onclick="toggleVisibility(${{t.id}}, '${{toggleTarget}}')" class="text-xs px-2 py-1 rounded bg-indigo-500/20 text-indigo-400 mr-1">${{toggleLabel}}</button>`
           : '';
+        const region = t.region || 'us-east-1';
+        const opusEnabled = t.opus_enabled || false;
+        const opusBtnClass = opusEnabled ? 'bg-orange-500/30 text-orange-300' : 'bg-gray-500/20 text-gray-400';
+        const opusBtnText = opusEnabled ? 'Opus ✓' : 'Opus';
         return `
           <tr class="table-row">
             <td class="py-3 px-3">
               <input type="checkbox" class="token-checkbox" data-token-id="${{t.id}}" onchange="toggleTokenSelection(${{t.id}}, this.checked)" ${{selectedTokenIds.has(t.id) ? 'checked' : ''}} style="cursor: pointer;">
             </td>
             <td class="py-3 px-3">#${{t.id}}</td>
+            <td class="py-3 px-3"><span class="text-cyan-400">${{region}}</span></td>
             <td class="py-3 px-3"><span class="${{t.visibility === 'public' ? 'text-green-400' : 'text-blue-400'}}">${{t.visibility === 'public' ? '公开' : '私有'}}</span></td>
             <td class="py-3 px-3">${{renderTokenStatus(t.status)}}</td>
             <td class="py-3 px-3">${{formatSuccessRate(t.success_rate)}}</td>
@@ -5085,6 +5105,7 @@ def render_user_page(user) -> str:
               ${toggleBtn}
               <button onclick="userRefreshToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-teal-500/20 text-teal-400 hover:bg-teal-500/30 mr-1">验证</button>
               <button onclick="testToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 mr-1">测试</button>
+              <button onclick="toggleOpus(${{t.id}}, ${{!opusEnabled}})" class="text-xs px-2 py-1 rounded ${{opusBtnClass}} hover:opacity-80 mr-1" title="标记为支持 Opus 模型的特殊账号">${{opusBtnText}}</button>
               <button onclick="deleteToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
             </td>
           </tr>
@@ -5447,6 +5468,7 @@ def render_user_page(user) -> str:
       document.getElementById('donateTokens').value = '';
       document.getElementById('donateFile').value = '';
       document.getElementById('donateAnonymous').checked = false;
+      document.getElementById('donateRegion').value = 'us-east-1';
     }}
 
     function setDonateMode(mode) {{
@@ -5531,6 +5553,7 @@ def render_user_page(user) -> str:
         }});
       }}
       const anonymous = document.getElementById('donateAnonymous').checked;
+      const region = document.getElementById('donateRegion').value;
 
       // 构建请求（后端自动识别 JSON 中的 clientId/clientSecret）
       const fd = new FormData();
@@ -5540,6 +5563,7 @@ def render_user_page(user) -> str:
         fd.append('tokens_text', tokensText);
       }}
       fd.append('visibility', visibility);
+      fd.append('region', region);
       if (visibility === 'public' && anonymous) fd.append('anonymous', 'true');
 
       // 提交
@@ -5615,6 +5639,32 @@ def render_user_page(user) -> str:
       await fetch('/user/api/tokens/' + tokenId, {{ method: 'DELETE' }});
       loadTokens();
       loadProfile();
+    }}
+
+    async function toggleOpus(tokenId, newOpusEnabled) {{
+      const action = newOpusEnabled ? '启用' : '禁用';
+      const confirmed = await showConfirmModal({{
+        title: 'Opus 模型支持',
+        message: `确定要${{action}}此 Token 的 Opus 模型支持吗？\\n\\n启用后，请求 Opus 模型时将优先使用此 Token。`,
+        icon: '🎯',
+        confirmText: '确认' + action,
+        danger: false
+      }});
+      if (!confirmed) return;
+      const fd = new FormData();
+      fd.append('opus_enabled', newOpusEnabled);
+      try {{
+        const r = await fetch('/user/api/tokens/' + tokenId + '/opus', {{ method: 'PUT', body: fd }});
+        if (r.ok) {{
+          loadTokens();
+        }} else {{
+          const d = await r.json();
+          alert(d.error || '操作失败');
+        }}
+      }} catch (e) {{
+        console.error(e);
+        alert('请求失败');
+      }}
     }}
 
     async function generateKey() {{

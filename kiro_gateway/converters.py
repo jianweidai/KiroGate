@@ -49,23 +49,10 @@ from kiro_gateway.models import (
 # Extended Thinking 相关常量
 # ==================================================================================================
 
-# Thinking 提示词 - 用于触发模型的 thinking 模式
-# 结合 XML 控制标签和自然语言指令，强制模型进行深度思考
-THINKING_HINT = """
-<thinking_mode>interleaved</thinking_mode><max_thinking_length>16000</max_thinking_length>
-You MUST think deeply and exhaustively before answering. Use <thinking> tags to show your detailed step-by-step reasoning.
-<thinking_mode>interleaved</thinking_mode><max_thinking_length>16000</max_thinking_length>
-"""
-
-# Thinking System Prompt - 强化思考指令
-THINKING_SYSTEM_PROMPT = """
-You are currently running in 'Extended Thinking Mode'.
-Your responses MUST differ from standard responses in the following way:
-1. You MUST start your response with a <thinking> block.
-2. Inside <thinking> tags, you MUST engage in a detailed, multi-step reasoning process. 
-3. Do not be brief in your thinking. Explore the problem depth, consider edge cases, and correct yourself if necessary.
-4. Only after fully thinking through the problem should you provide the final answer outside the tags.
-"""
+# Thinking 提示词 - 简单的 XML 控制标签
+# 不使用强制性自然语言指令，让模型根据需要自然决定是否思考
+# 参考 amq2api 的实现：只用 XML 标签，效果更自然
+THINKING_HINT = "<thinking_mode>interleaved</thinking_mode><max_thinking_length>16000</max_thinking_length>"
 
 # Thinking 标签
 THINKING_START_TAG = "<thinking>"
@@ -535,9 +522,10 @@ def build_kiro_payload(
         messages, request_data.tools
     )
     
-    # Extended Thinking：在 System Prompt 中注入强制思考指令
+    # Extended Thinking：在 System Prompt 中注入 XML 控制标签
+    # 使用温和的方式，不强制模型必须思考，让模型根据需要自然决定
     if thinking_enabled:
-        system_prompt = f"{system_prompt}\n{THINKING_SYSTEM_PROMPT}".strip()
+        system_prompt = f"{THINKING_HINT}\n{system_prompt}".strip() if system_prompt else THINKING_HINT
 
     # Объединяем соседние сообщения с одинаковой ролью
     merged_messages = merge_adjacent_messages(non_system_messages)
@@ -585,11 +573,9 @@ def build_kiro_payload(
     if not current_content:
         current_content = "Continue"
     
-    # Extended Thinking：在用户消息末尾注入 THINKING_HINT
-    # 这会触发模型输出 <thinking>...</thinking> 标签
-    if thinking_enabled and current_content:
-        current_content = f"{current_content}\n{THINKING_HINT}"
-        logger.debug("Extended Thinking 已启用，已注入 THINKING_HINT")
+    # 注意：不在用户消息末尾注入 THINKING_HINT
+    # XML 控制标签已经在 system prompt 中注入，足以让模型理解 thinking 模式
+    # 在用户消息末尾注入会干扰正常对话流程
     
     # 构建 userInputMessage
     user_input_message = {

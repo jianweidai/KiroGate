@@ -61,6 +61,8 @@ class DonatedToken:
     auth_type: str  # 'social' or 'idc'
     visibility: str  # 'public' or 'private'
     status: str  # 'active', 'invalid', 'expired'
+    region: str  # AWS region, default 'us-east-1'
+    opus_enabled: bool  # Whether this token supports Opus models
     success_count: int
     fail_count: int
     last_used: Optional[int]
@@ -237,6 +239,14 @@ class UserDatabase:
             if "client_secret_encrypted" not in columns:
                 conn.execute(
                     "ALTER TABLE tokens ADD COLUMN client_secret_encrypted TEXT"
+                )
+            if "region" not in columns:
+                conn.execute(
+                    "ALTER TABLE tokens ADD COLUMN region TEXT DEFAULT 'us-east-1'"
+                )
+            if "opus_enabled" not in columns:
+                conn.execute(
+                    "ALTER TABLE tokens ADD COLUMN opus_enabled INTEGER DEFAULT 0"
                 )
             announcement_columns = {row[1] for row in conn.execute("PRAGMA table_info(announcements)")}
             if "allow_guest" not in announcement_columns:
@@ -659,7 +669,8 @@ class UserDatabase:
         anonymous: bool = False,
         auth_type: str = "social",
         client_id: Optional[str] = None,
-        client_secret: Optional[str] = None
+        client_secret: Optional[str] = None,
+        region: str = "us-east-1"
     ) -> Tuple[bool, str]:
         """
         Donate a refresh token.
@@ -672,6 +683,7 @@ class UserDatabase:
             auth_type: 认证类型 (social/idc)
             client_id: OAuth Client ID (IDC 模式必填)
             client_secret: OAuth Client Secret (IDC 模式必填)
+            region: AWS 区域 (默认 us-east-1)
 
         Returns:
             (success, message) tuple
@@ -701,11 +713,11 @@ class UserDatabase:
                     """INSERT INTO tokens
                        (user_id, refresh_token_encrypted, token_hash, auth_type,
                         client_id_encrypted, client_secret_encrypted,
-                        visibility, is_anonymous, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        visibility, is_anonymous, region, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (user_id, encrypted, token_hash, auth_type,
                      client_id_enc, client_secret_enc,
-                     visibility, is_anonymous, now)
+                     visibility, is_anonymous, region, now)
                 )
                 return True, "Token 添加成功"
 
@@ -830,12 +842,12 @@ class UserDatabase:
         获取 token 的完整凭证信息（解密后）。
         
         Returns:
-            包含 refresh_token, auth_type, client_id, client_secret 的字典
+            包含 refresh_token, auth_type, client_id, client_secret, region 的字典
         """
         with self._get_conn() as conn:
             row = conn.execute(
                 """SELECT refresh_token_encrypted, auth_type,
-                          client_id_encrypted, client_secret_encrypted
+                          client_id_encrypted, client_secret_encrypted, region
                    FROM tokens WHERE id = ?""",
                 (token_id,)
             ).fetchone()
@@ -847,6 +859,7 @@ class UserDatabase:
                 "auth_type": row["auth_type"] or "social",
                 "client_id": self._decrypt_token(row["client_id_encrypted"]) if row["client_id_encrypted"] else None,
                 "client_secret": self._decrypt_token(row["client_secret_encrypted"]) if row["client_secret_encrypted"] else None,
+                "region": row["region"] if "region" in row.keys() else "us-east-1",
             }
 
     def set_token_visibility(self, token_id: int, visibility: str) -> bool:
@@ -872,6 +885,31 @@ class UserDatabase:
                     (status, token_id)
                 )
                 return True
+
+    def set_token_opus_enabled(self, token_id: int, opus_enabled: bool) -> bool:
+        """Set token opus_enabled flag."""
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "UPDATE tokens SET opus_enabled = ? WHERE id = ?",
+                    (1 if opus_enabled else 0, token_id)
+                )
+                logger.info(f"设置 Token {token_id} opus_enabled={opus_enabled}, 影响行数={cursor.rowcount}")
+                return cursor.rowcount > 0
+
+    def get_opus_enabled_tokens(self, user_id: Optional[int] = None) -> List[DonatedToken]:
+        """Get all active tokens with opus_enabled=True."""
+        with self._get_conn() as conn:
+            if user_id:
+                rows = conn.execute(
+                    "SELECT * FROM tokens WHERE opus_enabled = 1 AND status = 'active' AND user_id = ?",
+                    (user_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM tokens WHERE opus_enabled = 1 AND status = 'active'"
+                ).fetchall()
+            return [self._row_to_token(r) for r in rows]
 
     def delete_token(self, token_id: int, user_id: Optional[int] = None) -> bool:
         """Delete a token. If user_id provided, verify ownership."""
@@ -944,6 +982,14 @@ class UserDatabase:
         """Convert database row to DonatedToken object."""
         # 兼容旧数据，auth_type 可能不存在
         auth_type = row["auth_type"] if "auth_type" in row.keys() else "social"
+        # 兼容旧数据，region 可能不存在或为 NULL
+        region = "us-east-1"
+        if "region" in row.keys() and row["region"] is not None:
+            region = row["region"]
+        # 兼容旧数据，opus_enabled 可能不存在
+        opus_enabled = False
+        if "opus_enabled" in row.keys() and row["opus_enabled"] is not None:
+            opus_enabled = bool(row["opus_enabled"])
         return DonatedToken(
             id=row["id"],
             user_id=row["user_id"],
@@ -951,6 +997,8 @@ class UserDatabase:
             auth_type=auth_type,
             visibility=row["visibility"],
             status=row["status"],
+            region=region,
+            opus_enabled=opus_enabled,
             success_count=row["success_count"],
             fail_count=row["fail_count"],
             last_used=row["last_used"],
@@ -1348,7 +1396,9 @@ class UserDatabase:
                     "fail_count": r["fail_count"],
                     "success_rate": r["success_count"] / max(r["success_count"] + r["fail_count"], 1),
                     "last_used": r["last_used"],
-                    "created_at": r["created_at"]
+                    "created_at": r["created_at"],
+                    "region": r["region"] if "region" in r.keys() and r["region"] else "us-east-1",
+                    "opus_enabled": bool(r["opus_enabled"]) if "opus_enabled" in r.keys() and r["opus_enabled"] else False
                 }
                 for r in rows
             ]

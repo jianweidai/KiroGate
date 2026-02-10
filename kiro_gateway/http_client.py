@@ -256,7 +256,8 @@ class KiroHttpClient:
             except httpx.RequestError as e:
                 last_error = e
                 delay = settings.base_retry_delay * (2 ** attempt)
-                logger.warning(f"Request error: {e}, waiting {delay}s (attempt {attempt + 1}/{max_retries})")
+                error_detail = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
+                logger.warning(f"Request error: {error_detail}, URL: {url}, waiting {delay}s (attempt {attempt + 1}/{max_retries})")
                 await asyncio.sleep(delay)
 
         # All retries failed

@@ -15,7 +15,15 @@ from loguru import logger
 
 from kiro_gateway.database import user_db, DonatedToken
 from kiro_gateway.auth import KiroAuthManager
-from kiro_gateway.config import settings
+from kiro_gateway.config import settings, SLOW_MODELS
+
+
+def is_opus_model(model: str) -> bool:
+    """Check if the model is an Opus model."""
+    if not model:
+        return False
+    model_lower = model.lower()
+    return "opus" in model_lower
 
 
 class NoTokenAvailable(Exception):
@@ -131,12 +139,18 @@ class SmartTokenAllocator:
         self._reset_recent_usage_if_needed()
         self._recent_usage[token_id] = self._recent_usage.get(token_id, 0) + 1
 
-    async def get_best_token(self, user_id: Optional[int] = None) -> Tuple[DonatedToken, KiroAuthManager]:
+    async def get_best_token(self, user_id: Optional[int] = None, model: Optional[str] = None) -> Tuple[DonatedToken, KiroAuthManager]:
         """
         获取最优 Token。
 
         对于有用户的请求，优先使用用户自己的私有 Token。
         否则使用公共 Token 池。
+        
+        如果请求的是 Opus 模型，优先使用 opus_enabled=True 的 Token。
+
+        Args:
+            user_id: 用户 ID（可选）
+            model: 请求的模型名称（可选）
 
         Returns:
             (DonatedToken, KiroAuthManager) tuple
@@ -146,15 +160,39 @@ class SmartTokenAllocator:
         """
         from kiro_gateway.metrics import metrics
         self_use_enabled = metrics.is_self_use_enabled()
+        
+        # 检查是否请求 Opus 模型
+        requesting_opus = is_opus_model(model) if model else False
 
         if user_id:
             # 用户请求: 优先使用用户自己的私有 Token
-            user_tokens = user_db.get_user_tokens(user_id)
+            # 使用 limit=None 获取所有 token，避免分页导致遗漏
+            user_tokens = user_db.get_user_tokens(user_id, limit=None)
+            
+            # 打印所有用户 token 的详细信息（用于调试 Opus 选择问题）
+            logger.info(f"用户 {user_id} 的所有 Token: {[(t.id, t.status, t.visibility, t.opus_enabled) for t in user_tokens]}")
+            
             active_tokens = [
                 t for t in user_tokens
                 if t.status == "active" and (not self_use_enabled or t.visibility == "private")
             ]
+            
+            # 打印筛选后的 token
+            logger.info(f"用户 {user_id} 的活跃 Token (self_use={self_use_enabled}): {[(t.id, t.opus_enabled) for t in active_tokens]}")
+            
             if active_tokens:
+                # 如果请求 Opus 模型，优先选择 opus_enabled 的 Token
+                if requesting_opus:
+                    opus_tokens = [t for t in active_tokens if t.opus_enabled]
+                    if opus_tokens:
+                        best = self._weighted_random_choice(opus_tokens)
+                        self._record_recent_usage(best.id)
+                        logger.info(f"Token 分配 (Opus): 用户 {user_id} 从 {len(opus_tokens)} 个 Opus Token 中选择了 Token {best.id}")
+                        manager = await self._get_manager(best)
+                        return best, manager
+                    else:
+                        logger.warning(f"用户 {user_id} 没有支持 Opus 的 Token，将使用普通 Token")
+                
                 best = self._weighted_random_choice(active_tokens)
                 self._record_recent_usage(best.id)
                 logger.info(f"Token 分配: 用户 {user_id} 从 {len(active_tokens)} 个私有 Token 中选择了 Token {best.id}")
@@ -180,6 +218,18 @@ class SmartTokenAllocator:
             # 如果没有好的Token，使用所有可用的
             good_tokens = public_tokens
 
+        # 如果请求 Opus 模型，优先选择 opus_enabled 的 Token
+        if requesting_opus:
+            opus_tokens = [t for t in good_tokens if t.opus_enabled]
+            if opus_tokens:
+                best = self._weighted_random_choice(opus_tokens)
+                self._record_recent_usage(best.id)
+                logger.info(f"Token 分配 (Opus): 从 {len(opus_tokens)} 个 Opus Token 中选择了 Token {best.id}")
+                manager = await self._get_manager(best)
+                return best, manager
+            else:
+                logger.warning(f"公共池没有支持 Opus 的 Token，将使用普通 Token")
+
         # 使用加权随机选择，实现负载均衡
         best = self._weighted_random_choice(good_tokens)
         self._record_recent_usage(best.id)
@@ -193,21 +243,28 @@ class SmartTokenAllocator:
         """获取或创建 Token 对应的 AuthManager（线程安全）。"""
         async with self._lock:
             if token.id in self._token_managers:
-                return self._token_managers[token.id]
+                cached_manager = self._token_managers[token.id]
+                logger.debug(f"Token {token.id} 使用缓存的 AuthManager, api_host: {cached_manager.api_host}")
+                return cached_manager
 
-            # 获取完整凭证信息（包括 IDC 的 client_id 和 client_secret）
+            # 获取完整凭证信息（包括 IDC 的 client_id 和 client_secret，以及 region）
             credentials = user_db.get_token_credentials(token.id)
             if not credentials or not credentials.get("refresh_token"):
                 raise NoTokenAvailable(f"Failed to get credentials for token {token.id}")
 
+            # 使用 Token 的 region，如果不存在则使用默认值 'us-east-1'
+            token_region = credentials.get("region", "us-east-1")
+            logger.info(f"Token {token.id} 使用 region: {token_region}")
+
             # 创建 AuthManager，传递完整凭证以支持 IDC 认证模式
             manager = KiroAuthManager(
                 refresh_token=credentials["refresh_token"],
-                region=settings.region,
+                region=token_region,
                 profile_arn=settings.profile_arn,
                 client_id=credentials.get("client_id"),
                 client_secret=credentials.get("client_secret"),
             )
+            logger.info(f"Token {token.id} AuthManager api_host: {manager.api_host}")
 
             self._token_managers[token.id] = manager
             return manager

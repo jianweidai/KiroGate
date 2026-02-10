@@ -37,6 +37,7 @@ from fastapi import HTTPException
 from loguru import logger
 
 from kiro_gateway.parsers import AwsEventStreamParser, parse_bracket_tool_calls, deduplicate_tool_calls
+from kiro_gateway.thinking_parser import KiroThinkingTagParser, SegmentType
 from kiro_gateway.utils import generate_completion_id
 from kiro_gateway.config import settings, get_adaptive_timeout
 from kiro_gateway.tokenizer import count_tokens, count_message_tokens, count_tools_tokens

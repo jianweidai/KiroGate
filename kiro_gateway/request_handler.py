@@ -430,6 +430,25 @@ class RequestHandler:
         start_time = time.time()
         api_type = "anthropic" if response_format == "anthropic" else "openai"
 
+        # Check if we need deferred token selection (user API key mode)
+        needs_token_selection = getattr(request.state, 'needs_token_selection', False)
+        user_id = getattr(request.state, 'user_id', None)
+        
+        if needs_token_selection and user_id:
+            # Deferred token selection based on model
+            from kiro_gateway.token_allocator import token_allocator, NoTokenAvailable
+            try:
+                donated_token, auth_manager = await token_allocator.get_best_token(
+                    user_id=user_id,
+                    model=request_data.model
+                )
+                request.state.auth_manager = auth_manager
+                request.state.donated_token_id = donated_token.id
+                logger.info(f"延迟 Token 选择: 用户 {user_id}, 模型 {request_data.model}, Token {donated_token.id}")
+            except NoTokenAvailable as e:
+                logger.warning(f"用户可用 Token 不足: 用户ID={user_id}, 模型={request_data.model}, 错误={e}")
+                raise HTTPException(status_code=503, detail="该用户暂无可用的 Token")
+
         # Use auth_manager from request.state if available (multi-tenant mode)
         # Otherwise fall back to global auth_manager
         auth_manager: KiroAuthManager = getattr(request.state, 'auth_manager', None) or request.app.state.auth_manager

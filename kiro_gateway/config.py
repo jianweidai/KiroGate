@@ -454,6 +454,12 @@ AWS_SSO_OIDC_URL_TEMPLATE: str = "https://oidc.{region}.amazonaws.com/token"
 KIRO_API_HOST_TEMPLATE: str = "https://codewhisperer.{region}.amazonaws.com"
 KIRO_Q_HOST_TEMPLATE: str = "https://q.{region}.amazonaws.com"
 
+# CodeWhisperer API 固定区域
+# 根据 AWS 文档，CodeWhisperer API 只在 us-east-1 可用
+# https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/firewall.html
+CODEWHISPERER_API_REGION: str = "us-east-1"
+CODEWHISPERER_API_HOST: str = "https://codewhisperer.us-east-1.amazonaws.com"
+
 # ==================================================================================================
 # Model Mapping
 # ==================================================================================================

@@ -43,6 +43,7 @@ from kiro_gateway.config import (
     get_kiro_api_host,
     get_kiro_q_host,
     get_aws_sso_oidc_url,
+    CODEWHISPERER_API_HOST,
 )
 from kiro_gateway.utils import get_machine_fingerprint
 
@@ -144,10 +145,14 @@ class KiroAuthManager:
         # 认证类型，加载凭证后确定
         self._auth_type: AuthType = AuthType.SOCIAL
 
-        # Dynamic URLs based on region
+        # Dynamic URLs based on region (for authentication)
         self._refresh_url = get_kiro_refresh_url(region)
-        self._api_host = get_kiro_api_host(region)
         self._q_host = get_kiro_q_host(region)
+        
+        # CodeWhisperer API 固定使用 us-east-1
+        # 根据 AWS 文档，CodeWhisperer API 只在 us-east-1 可用
+        # https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/firewall.html
+        self._api_host = CODEWHISPERER_API_HOST
 
         # Fingerprint for User-Agent
         self._fingerprint = get_machine_fingerprint()
@@ -220,9 +225,10 @@ class KiroAuthManager:
                 self._profile_arn = data['profileArn']
             if 'region' in data:
                 self._region = data['region']
-                # Update URLs for new region
+                # Update authentication URLs for new region
+                # Note: api_host is NOT updated here because CodeWhisperer API
+                # is only available in us-east-1
                 self._refresh_url = get_kiro_refresh_url(self._region)
-                self._api_host = get_kiro_api_host(self._region)
                 self._q_host = get_kiro_q_host(self._region)
             
             # IDC (AWS SSO OIDC) 特有字段

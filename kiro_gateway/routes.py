@@ -81,6 +81,10 @@ from kiro_gateway.pages import (
 )
 from kiro_gateway.websearch import has_web_search_tool, handle_websearch_request
 
+# Supported AWS regions for Token donation
+SUPPORTED_REGIONS = {"us-east-1", "ap-southeast-1", "eu-west-1"}
+
+
 def _hash_rate_key(value: str) -> str:
     """Hash rate limit key to avoid leaking secrets."""
     return hashlib.sha256(value.encode()).hexdigest()
@@ -283,7 +287,6 @@ async def _parse_auth_header(auth_header: str, request: Request = None) -> tuple
     # Check if it's a user API key (sk-xxx format)
     if token.startswith("sk-"):
         from kiro_gateway.database import user_db
-        from kiro_gateway.token_allocator import token_allocator, NoTokenAvailable
 
         result = user_db.verify_api_key(token)
         if not result:
@@ -298,21 +301,14 @@ async def _parse_auth_header(auth_header: str, request: Request = None) -> tuple
             logger.warning(f"[{get_timestamp()}] 被封禁用户尝试使用 API Key: 用户ID={user_id}")
             raise HTTPException(status_code=403, detail="用户已被封禁")
 
-        # Get best token for this user
-        try:
-            donated_token, auth_manager = await token_allocator.get_best_token(user_id)
-            logger.debug(f"[{get_timestamp()}] 用户 API Key 模式: 用户ID={user_id}, Token ID={donated_token.id}")
+        # Store user info in request state, token selection will happen later based on model
+        if request:
+            request.state.api_key_id = api_key.id
+            request.state.user_id = user_id
+            request.state.needs_token_selection = True  # Flag for deferred token selection
 
-            # Store token_id in request state for usage tracking
-            if request:
-                request.state.donated_token_id = donated_token.id
-                request.state.api_key_id = api_key.id
-                request.state.user_id = user_id
-
-            return token, auth_manager, user_id, api_key.id
-        except NoTokenAvailable as e:
-            logger.warning(f"[{get_timestamp()}] 用户可用 Token 不足: 用户ID={user_id}, 错误={e}")
-            raise HTTPException(status_code=503, detail="该用户暂无可用的 Token")
+        logger.debug(f"[{get_timestamp()}] 用户 API Key 模式: 用户ID={user_id}, Token 选择将延迟到请求处理时")
+        return token, None, user_id, api_key.id
 
     logger.warning(f"[{get_timestamp()}] 传统模式下 API Key 无效")
     raise HTTPException(status_code=401, detail="API Key 无效或缺失")
@@ -408,7 +404,6 @@ async def verify_anthropic_api_key(
         # Check if it's a user API key (sk-xxx format)
         if x_api_key.startswith("sk-"):
             from kiro_gateway.database import user_db
-            from kiro_gateway.token_allocator import token_allocator, NoTokenAvailable
 
             result = user_db.verify_api_key(x_api_key)
             if not result:
@@ -423,18 +418,13 @@ async def verify_anthropic_api_key(
                 logger.warning(f"[{get_timestamp()}] 被封禁用户尝试使用 API Key: 用户ID={user_id}")
                 raise HTTPException(status_code=403, detail="用户已被封禁")
 
-            try:
-                donated_token, auth_manager = await token_allocator.get_best_token(user_id)
-                logger.debug(f"[{get_timestamp()}] x-api-key 用户 API Key 模式: 用户ID={user_id}, Token ID={donated_token.id}")
+            # Store user info in request state, token selection will happen later based on model
+            request.state.api_key_id = api_key.id
+            request.state.user_id = user_id
+            request.state.needs_token_selection = True  # Flag for deferred token selection
 
-                request.state.donated_token_id = donated_token.id
-                request.state.api_key_id = api_key.id
-                request.state.user_id = user_id
-
-                return auth_manager
-            except NoTokenAvailable as e:
-                logger.warning(f"[{get_timestamp()}] 用户可用 Token 不足: 用户ID={user_id}, 错误={e}")
-                raise HTTPException(status_code=503, detail="该用户暂无可用的 Token")
+            logger.debug(f"[{get_timestamp()}] x-api-key 用户 API Key 模式: 用户ID={user_id}, Token 选择将延迟到请求处理时")
+            return None  # Return None, token selection will happen in process_request
 
     # Try Authorization header (OpenAI format)
     if auth_header:
@@ -2263,6 +2253,23 @@ async def admin_delete_donated_token(
     return {"success": success}
 
 
+@router.post("/admin/api/donated-tokens/opus", include_in_schema=False)
+async def admin_toggle_token_opus(
+    request: Request,
+    token_id: int = Form(...),
+    opus_enabled: bool = Form(...),
+    _csrf: None = Depends(require_same_origin)
+):
+    """Toggle token opus_enabled flag."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.set_token_opus_enabled(token_id, opus_enabled)
+    return {"success": success}
+
+
 @router.get("/admin/api/announcement", include_in_schema=False)
 async def admin_get_announcement(request: Request):
     """Get latest announcement for admin."""
@@ -2589,9 +2596,11 @@ async def user_test_token(
         return JSONResponse(status_code=500, content={"error": "无法获取 Token 凭证"})
 
     try:
+        # 使用 Token 存储的 region，而不是全局配置的 region
+        token_region = credentials.get("region", "us-east-1")
         auth_manager = await auth_cache.get_or_create(
             refresh_token=credentials["refresh_token"],
-            region=settings.region,
+            region=token_region,
             profile_arn=settings.profile_arn,
             client_id=credentials["client_id"],
             client_secret=credentials["client_secret"]
@@ -2672,6 +2681,7 @@ async def user_get_tokens(
         "tokens": [
             {
                 "id": t.id,
+                "region": t.region,
                 "visibility": t.visibility,
                 "status": t.status,
                 "success_count": t.success_count,
@@ -2679,6 +2689,7 @@ async def user_get_tokens(
                 "success_rate": round(t.success_rate * 100, 1),
                 "last_used": t.last_used,
                 "created_at": t.created_at,
+                "opus_enabled": t.opus_enabled,
             }
             for t in tokens
         ],
@@ -2953,7 +2964,8 @@ async def _process_import_payload(
     user_id: int,
     visibility: str,
     anonymous: bool,
-    payload: object
+    payload: object,
+    region: str = "us-east-1"
 ) -> tuple[dict, int]:
     credentials, missing_required, missing_samples = _extract_refresh_tokens(payload)
     credentials = _dedupe_credentials(credentials)
@@ -2989,7 +3001,7 @@ async def _process_import_payload(
                     refresh_token=cred.refresh_token,
                     client_id=cred.client_id,
                     client_secret=cred.client_secret,
-                    region=settings.region,
+                    region=region,
                     profile_arn=settings.profile_arn
                 )
                 access_token = await temp_manager.get_access_token()
@@ -3023,6 +3035,7 @@ async def _process_import_payload(
             auth_type=cred.auth_type,
             client_id=cred.client_id,
             client_secret=cred.client_secret,
+            region=region,
         )
         if success:
             imported += 1
@@ -3069,6 +3082,7 @@ async def user_donate_token(
     client_secret: str = Form(""),
     visibility: str = Form("private"),
     anonymous: bool = Form(False),
+    region: str = Form("us-east-1"),
     _csrf: None = Depends(require_same_origin)
 ):
     """Donate a new token."""
@@ -3082,10 +3096,14 @@ async def user_donate_token(
 
     if visibility not in ("public", "private"):
         return JSONResponse(status_code=400, content={"error": "可见性无效"})
-    
+
     if auth_type not in ("social", "idc"):
         return JSONResponse(status_code=400, content={"error": "认证类型无效"})
-    
+
+    # Validate region
+    if region not in SUPPORTED_REGIONS:
+        return JSONResponse(status_code=400, content={"error": f"不支持的区域: {region}"})
+
     # IDC 模式必须提供 client_id 和 client_secret
     client_id = client_id.strip() if client_id else None
     client_secret = client_secret.strip() if client_secret else None
@@ -3102,7 +3120,7 @@ async def user_donate_token(
             refresh_token=refresh_token,
             client_id=client_id if auth_type == "idc" else None,
             client_secret=client_secret if auth_type == "idc" else None,
-            region=cfg.region,
+            region=region,  # Use specified region for validation
             profile_arn=cfg.profile_arn
         )
         access_token = await temp_manager.get_access_token()
@@ -3120,8 +3138,10 @@ async def user_donate_token(
         auth_type=auth_type,
         client_id=client_id if auth_type == "idc" else None,
         client_secret=client_secret if auth_type == "idc" else None,
+        region=region,
     )
     return {"success": success, "message": message}
+
 
 
 @router.post("/user/api/tokens/refresh", include_in_schema=False)
@@ -3157,11 +3177,13 @@ async def user_refresh_token(
              return JSONResponse(status_code=404, content={"error": "Token 凭证无效"})
              
         # Use temp manager to force verify against upstream
+        # 使用 Token 存储的 region，而不是全局配置的 region
+        token_region = creds.get("region", "us-east-1")
         temp_manager = KiroAuthManager(
             refresh_token=creds["refresh_token"],
             client_id=creds["client_id"],
             client_secret=creds["client_secret"],
-            region=cfg.region,
+            region=token_region,
             profile_arn=cfg.profile_arn
         )
         # Attempt to get access token (this will trigger refresh flow)
@@ -3189,6 +3211,7 @@ async def user_import_tokens(
     json_text: str | None = Form(None),
     visibility: str = Form("private"),
     anonymous: bool = Form(False),
+    region: str = Form("us-east-1"),
     _csrf: None = Depends(require_same_origin)
 ):
     """Import refresh tokens from a JSON file."""
@@ -3203,6 +3226,10 @@ async def user_import_tokens(
     if visibility not in ("public", "private"):
         return JSONResponse(status_code=400, content={"error": "可见性无效"})
 
+    # Validate region
+    if region not in SUPPORTED_REGIONS:
+        return JSONResponse(status_code=400, content={"error": f"不支持的区域: {region}"})
+
     payload, error, status = await _read_import_payload(
         file=file,
         file_path=file_path,
@@ -3216,7 +3243,8 @@ async def user_import_tokens(
         user_id=user.id,
         visibility=visibility,
         anonymous=anonymous,
-        payload=payload
+        payload=payload,
+        region=region,
     )
     if status != 200:
         return JSONResponse(status_code=status, content=result)
@@ -3303,6 +3331,29 @@ async def user_update_token(
         return JSONResponse(status_code=404, content={"error": "Token 不存在"})
 
     success = user_db.set_token_visibility(token_id, visibility)
+    return {"success": success}
+
+
+@router.put("/user/api/tokens/{token_id}/opus", include_in_schema=False)
+async def user_update_token_opus(
+    request: Request,
+    token_id: int,
+    opus_enabled: bool = Form(...),
+    _csrf: None = Depends(require_same_origin)
+):
+    """Update token opus_enabled flag."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    from kiro_gateway.database import user_db
+
+    # Verify ownership
+    token = user_db.get_token_by_id(token_id)
+    if not token or token.user_id != user.id:
+        return JSONResponse(status_code=404, content={"error": "Token 不存在"})
+
+    success = user_db.set_token_opus_enabled(token_id, opus_enabled)
     return {"success": success}
 
 
