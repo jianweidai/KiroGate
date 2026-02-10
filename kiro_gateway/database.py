@@ -143,6 +143,8 @@ class UserDatabase:
                     visibility TEXT DEFAULT 'private',
                     is_anonymous INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'active',
+                    region TEXT DEFAULT 'us-east-1',
+                    opus_enabled INTEGER DEFAULT 0,
                     success_count INTEGER DEFAULT 0,
                     fail_count INTEGER DEFAULT 0,
                     last_used INTEGER,
@@ -153,6 +155,22 @@ class UserDatabase:
                 CREATE INDEX IF NOT EXISTS idx_tokens_user ON tokens(user_id);
                 CREATE INDEX IF NOT EXISTS idx_tokens_visibility ON tokens(visibility, status);
                 CREATE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
+                
+                -- Add region column if it doesn't exist (migration for existing databases)
+                PRAGMA table_info(tokens);
+            ''')
+            
+            # Check if region column exists, add if missing
+            cursor = conn.execute("PRAGMA table_info(tokens)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "region" not in columns:
+                logger.info("Adding 'region' column to tokens table")
+                conn.execute("ALTER TABLE tokens ADD COLUMN region TEXT DEFAULT 'us-east-1'")
+            if "opus_enabled" not in columns:
+                logger.info("Adding 'opus_enabled' column to tokens table")
+                conn.execute("ALTER TABLE tokens ADD COLUMN opus_enabled INTEGER DEFAULT 0")
+            
+            conn.executescript('''
 
                 -- API Keys table
                 CREATE TABLE IF NOT EXISTS api_keys (
@@ -859,7 +877,7 @@ class UserDatabase:
                 "auth_type": row["auth_type"] or "social",
                 "client_id": self._decrypt_token(row["client_id_encrypted"]) if row["client_id_encrypted"] else None,
                 "client_secret": self._decrypt_token(row["client_secret_encrypted"]) if row["client_secret_encrypted"] else None,
-                "region": row["region"] if "region" in row.keys() else "us-east-1",
+                "region": row["region"] or "us-east-1",
             }
 
     def set_token_visibility(self, token_id: int, visibility: str) -> bool:

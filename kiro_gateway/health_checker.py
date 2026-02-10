@@ -109,18 +109,21 @@ class TokenHealthChecker:
         Returns:
             True if token is valid, False otherwise
         """
-        # 获取完整凭证信息（包括 IDC 的 client_id 和 client_secret）
+        # 获取完整凭证信息（包括 IDC 的 client_id、client_secret 和 region）
         credentials = user_db.get_token_credentials(token_id)
         if not credentials or not credentials.get("refresh_token"):
             user_db.record_health_check(token_id, False, "Failed to get token credentials")
             return False
 
+        # 从凭证中获取 region，如果没有则使用全局默认值
+        token_region = credentials.get("region") or settings.region
+        
         # Try to get access token
         try:
-            # 创建 AuthManager，传递完整凭证以支持 IDC 认证模式
+            # 创建 AuthManager，传递完整凭证（包括 region）以支持 IDC 认证模式和多区域
             manager = KiroAuthManager(
                 refresh_token=credentials["refresh_token"],
-                region=settings.region,
+                region=token_region,
                 profile_arn=settings.profile_arn,
                 client_id=credentials.get("client_id"),
                 client_secret=credentials.get("client_secret"),
