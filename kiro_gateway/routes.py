@@ -3202,6 +3202,58 @@ async def user_refresh_token(
         return JSONResponse(status_code=400, content={"error": f"刷新失败: {str(e)}"})
 
 
+@router.post("/user/api/tokens/batch-refresh", include_in_schema=False)
+async def user_batch_refresh_tokens(
+    request: Request,
+    _csrf: None = Depends(require_same_origin)
+):
+    """Batch refresh multiple tokens' validity."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    body = await request.json()
+    token_ids = body.get("token_ids", [])
+    if not token_ids or not isinstance(token_ids, list):
+        return JSONResponse(status_code=400, content={"error": "token_ids 不能为空"})
+
+    from kiro_gateway.database import user_db
+    from kiro_gateway.auth import KiroAuthManager
+    from kiro_gateway.config import settings as cfg
+
+    results = []
+    for token_id in token_ids:
+        token = user_db.get_token_by_id(token_id)
+        if not token:
+            results.append({"id": token_id, "success": False, "error": "Token 不存在"})
+            continue
+        if token.user_id != user.id and not user.is_admin:
+            results.append({"id": token_id, "success": False, "error": "无权操作"})
+            continue
+        try:
+            creds = user_db.get_token_credentials(token_id)
+            if not creds:
+                results.append({"id": token_id, "success": False, "error": "凭证无效"})
+                continue
+            token_region = creds.get("region", "us-east-1")
+            temp_manager = KiroAuthManager(
+                refresh_token=creds["refresh_token"],
+                client_id=creds["client_id"],
+                client_secret=creds["client_secret"],
+                region=token_region,
+                profile_arn=cfg.profile_arn
+            )
+            await temp_manager.force_refresh()
+            user_db.set_token_status(token_id, "active")
+            results.append({"id": token_id, "success": True})
+        except Exception as e:
+            logger.warning(f"批量刷新 Token 失败: ID={token_id}, Err={str(e)}")
+            results.append({"id": token_id, "success": False, "error": str(e)[:100]})
+
+    success_count = sum(1 for r in results if r["success"])
+    return {"results": results, "success_count": success_count, "total": len(results)}
+
+
 @router.post("/user/api/tokens/import", include_in_schema=False)
 async def user_import_tokens(
     request: Request,

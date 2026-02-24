@@ -367,19 +367,15 @@ async def generate_websearch_sse_events_anthropic(
 ) -> AsyncIterator[str]:
     """
     生成 Anthropic 格式的 Web Search SSE 事件序列
-    
-    Args:
-        model: 模型名称
-        query: 搜索查询
-        tool_use_id: 工具使用 ID
-        search_results: 搜索结果
-        input_tokens: 输入 token 数
-        
-    Yields:
-        str: SSE 格式的事件字符串
+
+    事件顺序（对齐 kiro.rs 官方实现）：
+    index 0: text block（搜索决策说明）
+    index 1: server_tool_use（input 在 content_block_start 中完整发送，无 input_json_delta）
+    index 2: web_search_tool_result（无 tool_use_id 字段）
+    index 3: text block（搜索结果摘要）
     """
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
-    
+
     # 1. message_start
     event = {
         "type": "message_start",
@@ -390,7 +386,6 @@ async def generate_websearch_sse_events_anthropic(
             "model": model,
             "content": [],
             "stop_reason": None,
-            "stop_sequence": None,
             "usage": {
                 "input_tokens": input_tokens,
                 "output_tokens": 0,
@@ -400,40 +395,46 @@ async def generate_websearch_sse_events_anthropic(
         }
     }
     yield f"event: message_start\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
-    # 2. content_block_start (server_tool_use)
+
+    # 2. content_block_start (text - 搜索决策说明, index 0)
+    decision_text = f'I\'ll search for "{query}".'
     event = {
         "type": "content_block_start",
         "index": 0,
+        "content_block": {"type": "text", "text": ""}
+    }
+    yield f"event: content_block_start\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    event = {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": decision_text}
+    }
+    yield f"event: content_block_delta\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    event = {"type": "content_block_stop", "index": 0}
+    yield f"event: content_block_stop\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    # 3. content_block_start (server_tool_use, index 1)
+    # server_tool_use 的 input 在 content_block_start 中一次性完整发送，无 input_json_delta
+    event = {
+        "type": "content_block_start",
+        "index": 1,
         "content_block": {
             "id": tool_use_id,
             "type": "server_tool_use",
             "name": "web_search",
-            "input": {}
+            "input": {"query": query}
         }
     }
     yield f"event: content_block_start\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
-    # 3. content_block_delta (input_json_delta)
-    input_json = {"query": query}
-    event = {
-        "type": "content_block_delta",
-        "index": 0,
-        "delta": {
-            "type": "input_json_delta",
-            "partial_json": json.dumps(input_json, ensure_ascii=False)
-        }
-    }
-    yield f"event: content_block_delta\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
+
     # 4. content_block_stop (server_tool_use)
-    event = {
-        "type": "content_block_stop",
-        "index": 0
-    }
+    event = {"type": "content_block_stop", "index": 1}
     yield f"event: content_block_stop\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
-    # 5. content_block_start (web_search_tool_result)
+
+    # 5. content_block_start (web_search_tool_result, index 2)
+    # 官方 API 的 web_search_tool_result 没有 tool_use_id 字段
     search_content = []
     if search_results and search_results.results:
         for result in search_results.results:
@@ -444,78 +445,65 @@ async def generate_websearch_sse_events_anthropic(
                 "encrypted_content": result.snippet or "",
                 "page_age": None
             })
-    
-    event = {
-        "type": "content_block_start",
-        "index": 1,
-        "content_block": {
-            "type": "web_search_tool_result",
-            "tool_use_id": tool_use_id,
-            "content": search_content
-        }
-    }
-    yield f"event: content_block_start\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
-    # 6. content_block_stop (web_search_tool_result)
-    event = {
-        "type": "content_block_stop",
-        "index": 1
-    }
-    yield f"event: content_block_stop\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
-    # 7. content_block_start (text)
+
     event = {
         "type": "content_block_start",
         "index": 2,
         "content_block": {
-            "type": "text",
-            "text": ""
+            "type": "web_search_tool_result",
+            "content": search_content
         }
     }
     yield f"event: content_block_start\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
+
+    # 6. content_block_stop (web_search_tool_result)
+    event = {"type": "content_block_stop", "index": 2}
+    yield f"event: content_block_stop\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    # 7. content_block_start (text, index 3)
+    event = {
+        "type": "content_block_start",
+        "index": 3,
+        "content_block": {"type": "text", "text": ""}
+    }
+    yield f"event: content_block_start\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
     # 8. content_block_delta (text_delta) - 生成搜索结果摘要
     summary = generate_search_summary(query, search_results)
-    
-    # 分块发送文本（每100字符一块）
+
     chunk_size = 100
     for i in range(0, len(summary), chunk_size):
         chunk = summary[i:i + chunk_size]
         event = {
             "type": "content_block_delta",
-            "index": 2,
-            "delta": {
-                "type": "text_delta",
-                "text": chunk
-            }
+            "index": 3,
+            "delta": {"type": "text_delta", "text": chunk}
         }
         yield f"event: content_block_delta\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
+
     # 9. content_block_stop (text)
-    event = {
-        "type": "content_block_stop",
-        "index": 2
-    }
+    event = {"type": "content_block_stop", "index": 3}
     yield f"event: content_block_stop\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
+
     # 10. message_delta
-    output_tokens = (len(summary) + 3) // 4  # 简单估算
+    # 官方 API 的 delta 中无 stop_sequence，usage 里有 server_tool_use.web_search_requests
+    output_tokens = (len(summary) + 3) // 4
     event = {
         "type": "message_delta",
         "delta": {
-            "stop_reason": "end_turn",
-            "stop_sequence": None
+            "stop_reason": "end_turn"
         },
         "usage": {
-            "output_tokens": output_tokens
+            "output_tokens": output_tokens,
+            "server_tool_use": {
+                "web_search_requests": 1
+            }
         }
     }
     yield f"event: message_delta\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-    
+
     # 11. message_stop
-    event = {
-        "type": "message_stop"
-    }
+    event = {"type": "message_stop"}
     yield f"event: message_stop\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 

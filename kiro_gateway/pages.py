@@ -4338,6 +4338,7 @@ def render_user_page(user) -> str:
                 <option value="50">50 条/页</option>
               </select>
               <button onclick="refreshTokens()" class="btn btn-primary text-sm px-3 py-1.5 rounded-lg" style="background: var(--primary); color: white;">刷新</button>
+              <button onclick="batchVerifyTokens()" id="batchVerifyTokensBtn" class="btn text-sm px-3 py-1.5 rounded-lg" style="background: #0ea5e9; color: white; display: none;">批量验证</button>
               <button onclick="batchDeleteTokens()" id="batchDeleteTokensBtn" class="btn btn-danger text-sm px-3 py-1.5 rounded-lg" style="background: #ef4444; color: white; display: none;">批量删除</button>
             </div>
             <button onclick="showDonateModal()" class="btn-primary">+ 添加 Token</button>
@@ -5088,8 +5089,8 @@ def render_user_page(user) -> str:
           : '';
         const region = t.region || 'us-east-1';
         const opusEnabled = t.opus_enabled || false;
-        const opusBtnClass = opusEnabled ? 'bg-orange-500/30 text-orange-300' : 'bg-gray-500/20 text-gray-400';
-        const opusBtnText = opusEnabled ? 'Opus ✓' : 'Opus';
+        const opusBtnClass = opusEnabled ? 'bg-blue-500/30 text-blue-300' : 'bg-gray-500/20 text-gray-400';
+        const opusBtnText = opusEnabled ? 'Pro+' : 'Free';
         return `
           <tr class="table-row">
             <td class="py-3 px-3">
@@ -5105,7 +5106,7 @@ def render_user_page(user) -> str:
               ${toggleBtn}
               <button onclick="userRefreshToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-teal-500/20 text-teal-400 hover:bg-teal-500/30 mr-1">验证</button>
               <button onclick="testToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 mr-1">测试</button>
-              <button onclick="toggleOpus(${{t.id}}, ${{!opusEnabled}})" class="text-xs px-2 py-1 rounded ${{opusBtnClass}} hover:opacity-80 mr-1" title="标记为支持 Opus 模型的特殊账号">${{opusBtnText}}</button>
+              <button onclick="toggleOpus(${{t.id}}, ${{!opusEnabled}})" class="text-xs px-2 py-1 rounded ${{opusBtnClass}} hover:opacity-80 mr-1" title="标记为 Pro+ 账号（支持 Opus 4.5/4.6、Sonnet 4.6 模型）">${{opusBtnText}}</button>
               <button onclick="deleteToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
             </td>
           </tr>
@@ -5173,12 +5174,48 @@ def render_user_page(user) -> str:
     }}
 
     function updateBatchDeleteTokenBtn() {{
-      const btn = document.getElementById('batchDeleteTokensBtn');
+      const deleteBtn = document.getElementById('batchDeleteTokensBtn');
+      const verifyBtn = document.getElementById('batchVerifyTokensBtn');
       if (selectedTokenIds.size > 0) {{
-        btn.style.display = 'inline-block';
-        btn.textContent = `批量删除 (${{selectedTokenIds.size}})`;
+        deleteBtn.style.display = 'inline-block';
+        deleteBtn.textContent = `批量删除 (${{selectedTokenIds.size}})`;
+        verifyBtn.style.display = 'inline-block';
+        verifyBtn.textContent = `批量验证 (${{selectedTokenIds.size}})`;
       }} else {{
-        btn.style.display = 'none';
+        deleteBtn.style.display = 'none';
+        verifyBtn.style.display = 'none';
+      }}
+    }}
+
+    async function batchVerifyTokens() {{
+      if (selectedTokenIds.size === 0) return;
+      const tokenIds = Array.from(selectedTokenIds);
+      const verifyBtn = document.getElementById('batchVerifyTokensBtn');
+      verifyBtn.disabled = true;
+      verifyBtn.textContent = `验证中...`;
+
+      try {{
+        const resp = await fetch('/user/api/tokens/batch-refresh', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ token_ids: tokenIds }})
+        }});
+        const data = await resp.json();
+        if (resp.ok) {{
+          const failed = data.results.filter(r => !r.success);
+          if (failed.length === 0) {{
+            alert(`✅ 全部 ${{data.success_count}} 个 Token 验证成功`);
+          }} else {{
+            alert(`⚠️ ${{data.success_count}} 个成功，${{failed.length}} 个失败`);
+          }}
+        }} else {{
+          alert('批量验证失败: ' + (data.error || '未知错误'));
+        }}
+      }} catch(e) {{
+        alert('请求失败: ' + e.message);
+      }} finally {{
+        verifyBtn.disabled = false;
+        loadTokens();
       }}
     }}
 
@@ -5642,12 +5679,12 @@ def render_user_page(user) -> str:
     }}
 
     async function toggleOpus(tokenId, newOpusEnabled) {{
-      const action = newOpusEnabled ? '启用' : '禁用';
+      const action = newOpusEnabled ? '设为 Pro+' : '设为 Free';
       const confirmed = await showConfirmModal({{
-        title: 'Opus 模型支持',
-        message: `确定要${{action}}此 Token 的 Opus 模型支持吗？\\n\\n启用后，请求 Opus 模型时将优先使用此 Token。`,
-        icon: '🎯',
-        confirmText: '确认' + action,
+        title: 'Token 订阅类型',
+        message: `确定要将此 Token ${{action}} 吗？\\n\\nPro+ Token 可用于 Opus 4.5/4.6、Sonnet 4.6 等高级模型。\\nFree Token 只能用于 Sonnet 4.5、Haiku 等基础模型。`,
+        icon: newOpusEnabled ? '⭐' : '🔓',
+        confirmText: action,
         danger: false
       }});
       if (!confirmed) return;

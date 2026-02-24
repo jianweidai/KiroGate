@@ -246,11 +246,12 @@ class AwsEventStreamParser:
         '{"followupPrompt":': 'followup',
         '{"usage":': 'usage',
         '{"contextUsagePercentage":': 'context_usage',
+        '{"exceptionType":': 'exception',
     }
 
     # 预编译的正则表达式（性能优化：单次匹配所有模式）
     _PATTERN_REGEX = re.compile(
-        r'\{"(?:content|name|input|stop|followupPrompt|usage|contextUsagePercentage)":'
+        r'\{"(?:content|name|input|stop|followupPrompt|usage|contextUsagePercentage|exceptionType)":'
     )
 
     def __init__(self):
@@ -339,6 +340,8 @@ class AwsEventStreamParser:
             return {"type": "usage", "data": data.get('usage', 0)}
         elif event_type == 'context_usage':
             return {"type": "context_usage", "data": data.get('contextUsagePercentage', 0)}
+        elif event_type == 'exception':
+            return {"type": "exception", "data": data.get('exceptionType', '')}
         
         return None
     

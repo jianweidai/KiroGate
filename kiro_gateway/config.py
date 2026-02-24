@@ -440,6 +440,8 @@ GITHUB_USER_URL: str = "https://api.github.com/user"
 SLOW_MODELS: frozenset = frozenset({
     "claude-opus-4-5",
     "claude-opus-4-5-20251101",
+    "claude-opus-4-6",
+    "claude-opus-4-6-20260101",
     "claude-3-opus",
     "claude-3-opus-20240229",
 })
@@ -466,7 +468,11 @@ CODEWHISPERER_API_HOST: str = "https://codewhisperer.us-east-1.amazonaws.com"
 
 # External model names (OpenAI compatible) -> Kiro internal ID
 MODEL_MAPPING: Dict[str, str] = {
-    # Claude Opus 4.5 - Top tier model
+    # Claude Opus 4.6 - Top tier model (Pro+ only)
+    "claude-opus-4-6": "claude-opus-4.6",
+    "claude-opus-4-6-20260101": "claude-opus-4.6",
+
+    # Claude Opus 4.5 - Top tier model (Pro+ only)
     "claude-opus-4-5": "claude-opus-4.5",
     "claude-opus-4-5-20251101": "claude-opus-4.5",
 
@@ -474,6 +480,10 @@ MODEL_MAPPING: Dict[str, str] = {
     "claude-haiku-4-5": "claude-haiku-4.5",
     "claude-haiku-4-5-20251001": "claude-haiku-4.5",
     "claude-haiku-4.5": "claude-haiku-4.5",
+
+    # Claude Sonnet 4.6 - Enhanced model (Pro+ only)
+    "claude-sonnet-4-6": "claude-sonnet-4.6",
+    "claude-sonnet-4-6-20260101": "claude-sonnet-4.6",
 
     # Claude Sonnet 4.5 - Enhanced model
     "claude-sonnet-4-5": "CLAUDE_SONNET_4_5_20250929_V1_0",
@@ -492,16 +502,35 @@ MODEL_MAPPING: Dict[str, str] = {
 
 # Available models list for /v1/models endpoint
 AVAILABLE_MODELS: List[str] = [
+    "claude-opus-4-6",
+    "claude-opus-4-6-20260101",
     "claude-opus-4-5",
     "claude-opus-4-5-20251101",
     "claude-haiku-4-5",
     "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-6-20260101",
     "claude-sonnet-4-5",
     "claude-sonnet-4-5-20250929",
     "claude-sonnet-4",
     "claude-sonnet-4-20250514",
     "claude-3-7-sonnet-20250219",
 ]
+
+# Pro+ 专属模型（需要 opus_enabled=True 的 Token）
+PRO_PLUS_MODELS: frozenset = frozenset({
+    "claude-opus-4-5",
+    "claude-opus-4-5-20251101",
+    "claude-opus-4-6",
+    "claude-opus-4-6-20260101",
+    "claude-3-opus",
+    "claude-3-opus-20240229",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-6-20260101",
+    "claude-opus-4.5",
+    "claude-opus-4.6",
+    "claude-sonnet-4.6",
+})
 
 # ==================================================================================================
 # Version Info

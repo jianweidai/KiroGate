@@ -513,6 +513,10 @@ async def stream_kiro_to_openai_internal(
             elif event["type"] == "context_usage":
                 context_usage_percentage = event["data"]
 
+            elif event["type"] == "exception":
+                exception_type_val = event["data"]
+                logger.warning(f"Kiro API exception event: {exception_type_val}")
+
         # Continue reading remaining chunks with adaptive timeout
         # 对于慢模型和大文档，可能需要更长时间等待每个 chunk
         consecutive_timeouts = 0
@@ -596,6 +600,10 @@ async def stream_kiro_to_openai_internal(
 
                 elif event["type"] == "context_usage":
                     context_usage_percentage = event["data"]
+
+                elif event["type"] == "exception":
+                    exception_type_val = event["data"]
+                    logger.warning(f"Kiro API exception event: {exception_type_val}")
 
         # 流结束，刷新 thinking 解析器缓冲区
         if thinking_enabled and thinking_parser:
@@ -1035,7 +1043,8 @@ async def stream_kiro_to_anthropic(
     text_block_started = False
     thinking_block_started = False  # Extended Thinking: 跟踪 thinking 块状态
     tool_blocks_started = {}  # tool_id -> index
-    
+    exception_stop_reason: Optional[str] = None  # 来自 exception 事件的 stop_reason 覆盖
+
     # 初始化 ThinkingStreamHandler
     thinking_handler = ThinkingStreamHandler(thinking_enabled=thinking_enabled)
     
@@ -1184,6 +1193,15 @@ async def stream_kiro_to_anthropic(
 
                 elif event["type"] == "context_usage":
                     context_usage_percentage = event["data"]
+                    # 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
+                    if context_usage_percentage >= 100.0:
+                        exception_stop_reason = "model_context_window_exceeded"
+
+                elif event["type"] == "exception":
+                    exception_type = event["data"]
+                    if exception_type == "ContentLengthExceededException":
+                        exception_stop_reason = "max_tokens"
+                    logger.warning(f"Kiro API exception event: {exception_type}")
         
         # 刷新 thinking handler 中剩余的内容
         flush_events = thinking_handler.flush()
@@ -1285,6 +1303,9 @@ async def stream_kiro_to_anthropic(
 
         # Определяем stop_reason
         stop_reason = "tool_use" if all_tool_calls else "end_turn"
+        # exception 事件覆盖 stop_reason（context window 满 / 输出超长）
+        if exception_stop_reason and not all_tool_calls:
+            stop_reason = exception_stop_reason
 
         # 使用统一的 token 计算函数（消除重复代码）
         usage_info = _calculate_usage_tokens(
@@ -1363,6 +1384,7 @@ async def collect_anthropic_response(
     metering_data = None
     context_usage_percentage = None
     content_parts: list[str] = []  # 使用 list 替代字符串拼接，提升性能
+    exception_stop_reason: Optional[str] = None  # 来自 exception 事件的 stop_reason 覆盖
 
     # 根据模型自适应调整超时时间
     adaptive_stream_read_timeout = get_adaptive_timeout(model, stream_read_timeout)
@@ -1404,6 +1426,13 @@ async def collect_anthropic_response(
                     metering_data = event["data"]
                 elif event["type"] == "context_usage":
                     context_usage_percentage = event["data"]
+                    if context_usage_percentage >= 100.0:
+                        exception_stop_reason = "model_context_window_exceeded"
+                elif event["type"] == "exception":
+                    exception_type = event["data"]
+                    if exception_type == "ContentLengthExceededException":
+                        exception_stop_reason = "max_tokens"
+                    logger.warning(f"Kiro API exception event: {exception_type}")
 
     finally:
         await response.aclose()
@@ -1447,6 +1476,9 @@ async def collect_anthropic_response(
 
     # Определяем stop_reason
     stop_reason = "tool_use" if all_tool_calls else "end_turn"
+    # exception 事件覆盖 stop_reason（context window 满 / 输出超长）
+    if exception_stop_reason and not all_tool_calls:
+        stop_reason = exception_stop_reason
 
     # 使用统一的 token 计算函数（消除重复代码）
     usage_info = _calculate_usage_tokens(

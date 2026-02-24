@@ -15,15 +15,29 @@ from loguru import logger
 
 from kiro_gateway.database import user_db, DonatedToken
 from kiro_gateway.auth import KiroAuthManager
-from kiro_gateway.config import settings, SLOW_MODELS
+from kiro_gateway.config import settings, SLOW_MODELS, PRO_PLUS_MODELS
 
 
-def is_opus_model(model: str) -> bool:
-    """Check if the model is an Opus model."""
+def requires_pro_plus(model: str) -> bool:
+    """Check if the model requires a Pro+ token (opus_enabled=True)."""
     if not model:
         return False
+    # 先检查精确匹配（含内部 ID）
+    if model in PRO_PLUS_MODELS:
+        return True
     model_lower = model.lower()
-    return "opus" in model_lower
+    # 包含 opus 关键字
+    if "opus" in model_lower:
+        return True
+    # sonnet-4-6 / sonnet-4.6
+    if "sonnet" in model_lower and ("4-6" in model_lower or "4.6" in model_lower):
+        return True
+    return False
+
+
+# 向后兼容别名
+def is_opus_model(model: str) -> bool:
+    return requires_pro_plus(model)
 
 
 class NoTokenAvailable(Exception):
@@ -161,15 +175,15 @@ class SmartTokenAllocator:
         from kiro_gateway.metrics import metrics
         self_use_enabled = metrics.is_self_use_enabled()
         
-        # 检查是否请求 Opus 模型
-        requesting_opus = is_opus_model(model) if model else False
+        # 检查是否请求 Pro+ 专属模型
+        requesting_pro_plus = requires_pro_plus(model) if model else False
 
         if user_id:
             # 用户请求: 优先使用用户自己的私有 Token
             # 使用 limit=None 获取所有 token，避免分页导致遗漏
             user_tokens = user_db.get_user_tokens(user_id, limit=None)
             
-            # 打印所有用户 token 的详细信息（用于调试 Opus 选择问题）
+            # 打印所有用户 token 的详细信息（用于调试 Pro+ 选择问题）
             logger.info(f"用户 {user_id} 的所有 Token: {[(t.id, t.status, t.visibility, t.opus_enabled) for t in user_tokens]}")
             
             active_tokens = [
@@ -181,17 +195,17 @@ class SmartTokenAllocator:
             logger.info(f"用户 {user_id} 的活跃 Token (self_use={self_use_enabled}): {[(t.id, t.opus_enabled) for t in active_tokens]}")
             
             if active_tokens:
-                # 如果请求 Opus 模型，优先选择 opus_enabled 的 Token
-                if requesting_opus:
-                    opus_tokens = [t for t in active_tokens if t.opus_enabled]
-                    if opus_tokens:
-                        best = self._weighted_random_choice(opus_tokens)
+                # 如果请求 Pro+ 专属模型，优先选择 opus_enabled (Pro+) 的 Token
+                if requesting_pro_plus:
+                    pro_tokens = [t for t in active_tokens if t.opus_enabled]
+                    if pro_tokens:
+                        best = self._weighted_random_choice(pro_tokens)
                         self._record_recent_usage(best.id)
-                        logger.info(f"Token 分配 (Opus): 用户 {user_id} 从 {len(opus_tokens)} 个 Opus Token 中选择了 Token {best.id}")
+                        logger.info(f"Token 分配 (Pro+): 用户 {user_id} 从 {len(pro_tokens)} 个 Pro+ Token 中选择了 Token {best.id}")
                         manager = await self._get_manager(best)
                         return best, manager
                     else:
-                        logger.warning(f"用户 {user_id} 没有支持 Opus 的 Token，将使用普通 Token")
+                        logger.warning(f"用户 {user_id} 没有 Pro+ Token，将使用普通 Token")
                 
                 best = self._weighted_random_choice(active_tokens)
                 self._record_recent_usage(best.id)
@@ -218,17 +232,17 @@ class SmartTokenAllocator:
             # 如果没有好的Token，使用所有可用的
             good_tokens = public_tokens
 
-        # 如果请求 Opus 模型，优先选择 opus_enabled 的 Token
-        if requesting_opus:
-            opus_tokens = [t for t in good_tokens if t.opus_enabled]
-            if opus_tokens:
-                best = self._weighted_random_choice(opus_tokens)
+        # 如果请求 Pro+ 专属模型，优先选择 Pro+ Token
+        if requesting_pro_plus:
+            pro_tokens = [t for t in good_tokens if t.opus_enabled]
+            if pro_tokens:
+                best = self._weighted_random_choice(pro_tokens)
                 self._record_recent_usage(best.id)
-                logger.info(f"Token 分配 (Opus): 从 {len(opus_tokens)} 个 Opus Token 中选择了 Token {best.id}")
+                logger.info(f"Token 分配 (Pro+): 从 {len(pro_tokens)} 个 Pro+ Token 中选择了 Token {best.id}")
                 manager = await self._get_manager(best)
                 return best, manager
             else:
-                logger.warning(f"公共池没有支持 Opus 的 Token，将使用普通 Token")
+                logger.warning(f"公共池没有 Pro+ Token，将使用普通 Token")
 
         # 使用加权随机选择，实现负载均衡
         best = self._weighted_random_choice(good_tokens)

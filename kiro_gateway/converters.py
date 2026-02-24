@@ -524,11 +524,8 @@ def build_kiro_payload(
         messages, request_data.tools
     )
     
-    # Extended Thinking：在 System Prompt 中注入提示
-    # 使用温和的方式：XML 标签 + 简短说明，鼓励但不强制思考
-    if thinking_enabled:
-        thinking_instruction = f"{THINKING_HINT}\n{THINKING_SYSTEM_PROMPT}"
-        system_prompt = f"{thinking_instruction}\n\n{system_prompt}".strip() if system_prompt else thinking_instruction
+    # thinking_instruction 不注入 system_prompt，避免膨胀历史消息
+    # 后续单独追加到当前消息末尾（参考 amq2api 实现）
 
     # Объединяем соседние сообщения с одинаковой ролью
     merged_messages = merge_adjacent_messages(non_system_messages)
@@ -543,21 +540,14 @@ def build_kiro_payload(
     # Строим историю (все сообщения кроме последнего)
     history_messages = merged_messages[:-1] if len(merged_messages) > 1 else []
     
-    # Если есть system prompt, добавляем его к первому user сообщению в истории
-    if system_prompt and history_messages:
-        first_msg = history_messages[0]
-        if first_msg.role == "user":
-            original_content = extract_text_content(first_msg.content)
-            first_msg.content = f"{system_prompt}\n\n{original_content}"
-    
     history = build_kiro_history(history_messages, model_id)
     
     # Текущее сообщение (последнее)
     current_message = merged_messages[-1]
     current_content = extract_text_content(current_message.content)
     
-    # Если system prompt есть, но история пуста - добавляем к текущему сообщению
-    if system_prompt and not history:
+    # System prompt 只注入到当前消息（最后一条），避免历史消息因叠加 system prompt 而超长
+    if system_prompt:
         current_content = f"{system_prompt}\n\n{current_content}"
     
     # Если текущее сообщение - assistant, нужно добавить его в историю
@@ -575,11 +565,12 @@ def build_kiro_payload(
     # 如果内容为空，使用 "Continue"
     if not current_content:
         current_content = "Continue"
-    
-    # 注意：不在用户消息末尾注入 THINKING_HINT
-    # XML 控制标签已经在 system prompt 中注入，足以让模型理解 thinking 模式
-    # 在用户消息末尾注入会干扰正常对话流程
-    
+
+    # THINKING_HINT 追加到当前消息末尾（参考 amq2api 实现）
+    # 不注入 system_prompt，避免膨胀历史消息
+    if thinking_enabled:
+        current_content = f"{current_content}\n{THINKING_HINT}"
+
     # 构建 userInputMessage
     user_input_message = {
         "content": current_content,
@@ -666,11 +657,55 @@ def _build_user_input_context(
 # Anthropic -> OpenAI Conversion Functions
 # ==================================================================================================
 
+def _normalize_json_schema(schema: Any) -> Dict[str, Any]:
+    """
+    规范化 JSON Schema，修复 MCP 工具定义中常见的类型问题。
+
+    Claude Code / MCP 工具定义偶尔会出现 `required: null`、`properties: null` 等，
+    导致上游返回 400 "Improperly formed request"。
+
+    对应 kiro.rs 的 normalize_json_schema 函数。
+
+    Args:
+        schema: 原始 JSON Schema（可能包含 null 字段）
+
+    Returns:
+        规范化后的 JSON Schema
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}, "required": [], "additionalProperties": True}
+
+    result = dict(schema)
+
+    # type 必须是非空字符串
+    if not isinstance(result.get("type"), str) or not result["type"]:
+        result["type"] = "object"
+
+    # properties 必须是 dict
+    if not isinstance(result.get("properties"), dict):
+        result["properties"] = {}
+
+    # required 必须是字符串列表
+    raw_required = result.get("required")
+    if isinstance(raw_required, list):
+        result["required"] = [r for r in raw_required if isinstance(r, str)]
+    else:
+        result["required"] = []
+
+    # additionalProperties 允许 bool 或 dict，其他按 True 处理
+    ap = result.get("additionalProperties")
+    if not isinstance(ap, (bool, dict)):
+        result["additionalProperties"] = True
+
+    return result
+
+
 def convert_anthropic_tools_to_openai(tools: Optional[List[AnthropicTool]]) -> Optional[List[Tool]]:
     """
     Преобразует Anthropic tools в формат OpenAI.
 
     Anthropic использует input_schema, OpenAI использует parameters.
+    同时对 input_schema 进行规范化，修复 MCP 工具定义中的类型问题。
 
     Args:
         tools: Список инструментов в формате Anthropic
@@ -683,12 +718,13 @@ def convert_anthropic_tools_to_openai(tools: Optional[List[AnthropicTool]]) -> O
 
     openai_tools = []
     for tool in tools:
+        normalized_schema = _normalize_json_schema(tool.input_schema)
         openai_tool = Tool(
             type="function",
             function=ToolFunction(
                 name=tool.name,
                 description=tool.description,
-                parameters=tool.input_schema
+                parameters=normalized_schema
             )
         )
         openai_tools.append(openai_tool)

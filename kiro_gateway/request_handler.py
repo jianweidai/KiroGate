@@ -175,6 +175,31 @@ class RequestHandler:
                 except Exception as e:
                     logger.warning(f"Failed to mark token expired: {e}")
 
+        # 上下文窗口满 / 输入过长 → 返回 400 invalid_request_error（不应重试）
+        combined_error = (error_reason or "") + error_message
+        if "CONTENT_LENGTH_EXCEEDS_THRESHOLD" in combined_error:
+            if error_format == "anthropic":
+                return JSONResponse(
+                    status_code=400,
+                    content={"type": "error", "error": {"type": "invalid_request_error", "message": "Context window is full. Reduce conversation history, system prompt, or tools."}}
+                )
+            else:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": "Context window is full. Reduce conversation history, system prompt, or tools.", "type": "invalid_request_error", "code": 400}}
+                )
+        if "Input is too long" in combined_error:
+            if error_format == "anthropic":
+                return JSONResponse(
+                    status_code=400,
+                    content={"type": "error", "error": {"type": "invalid_request_error", "message": "Input is too long. Reduce the size of your messages."}}
+                )
+            else:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": "Input is too long. Reduce the size of your messages.", "type": "invalid_request_error", "code": 400}}
+                )
+
         # 根据格式返回错误
         if error_format == "anthropic":
             return JSONResponse(
