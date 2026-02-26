@@ -4288,6 +4288,7 @@ def render_user_page(user) -> str:
     <div class="flex gap-2 mb-4 border-b" style="border-color: var(--border);">
       <button class="tab px-4 py-2 font-medium" onclick="showTab('tokens')" id="tab-tokens">🔑 Token 管理</button>
       <button class="tab px-4 py-2 font-medium" onclick="showTab('keys')" id="tab-keys">🗝️ API Keys</button>
+      <button class="tab px-4 py-2 font-medium" onclick="showTab('custom-apis')" id="tab-custom-apis">🔌 Custom API</button>
     </div>
     <div id="panel-tokens" class="tab-panel">
       <div class="card">
@@ -4366,7 +4367,7 @@ def render_user_page(user) -> str:
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('visibility')">可见性 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('status')">状态 ↕</th>
                   <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('success_rate')">成功率 ↕</th>
-                  <th class="text-left py-3 px-3 cursor-pointer hover:text-indigo-400" onclick="sortTokens('last_used')">最后使用 ↕</th>
+                  <th class="text-left py-3 px-3">用量</th>
                   <th class="text-left py-3 px-3">操作</th>
                 </tr>
               </thead>
@@ -4490,6 +4491,43 @@ def render_user_page(user) -> str:
         </p>
       </div>
     </div>
+    <div id="panel-custom-apis" class="tab-panel" style="display: none;">
+      <div class="card">
+        <div class="flex flex-wrap justify-between items-center gap-4 mb-4 toolbar">
+          <h2 class="text-lg font-bold">Custom API 账号</h2>
+          <div class="flex items-center gap-2">
+            <button onclick="loadCustomApis()" class="btn btn-primary text-sm">刷新</button>
+            <button onclick="showCustomApiModal()" class="btn-primary text-sm">+ 添加 Custom API</button>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm data-table">
+            <thead>
+              <tr style="color: var(--text-muted); border-bottom: 1px solid var(--border);">
+                <th class="text-left py-3 px-3">名称 / API Base</th>
+                <th class="text-left py-3 px-3">API Key</th>
+                <th class="text-left py-3 px-3">格式</th>
+                <th class="text-left py-3 px-3">Provider</th>
+                <th class="text-left py-3 px-3">Model</th>
+                <th class="text-left py-3 px-3">状态</th>
+                <th class="text-left py-3 px-3">用量</th>
+                <th class="text-left py-3 px-3">操作</th>
+              </tr>
+            </thead>
+            <tbody id="customApiTable">
+              <tr><td colspan="8" class="py-6 text-center" style="color: var(--text-muted);">加载中...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="customApiPagination" class="flex items-center justify-between mt-4 pt-4" style="border-top: 1px solid var(--border); display: none;">
+          <span id="customApiInfo" class="text-sm" style="color: var(--text-muted);"></span>
+          <div id="customApiPages" class="flex gap-1"></div>
+        </div>
+        <p class="mt-4 text-sm" style="color: var(--text-muted);">
+          💡 Custom API 账号与 Kiro Token 共同参与请求路由，系统随机选择可用账号。
+        </p>
+      </div>
+    </div>
   </main>
   <div id="donateModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
     <div class="card w-full max-w-md mx-4" style="max-height: 90vh; overflow-y: auto;">
@@ -4549,6 +4587,83 @@ def render_user_page(user) -> str:
       <div class="flex justify-end gap-2 mt-4">
         <button onclick="hideDonateModal()" class="px-4 py-2 rounded-lg" style="background: var(--bg-input);">取消</button>
         <button onclick="submitTokens()" class="btn-primary">提交并导入</button>
+      </div>
+    </div>
+  </div>
+  <!-- Custom API 添加弹窗 -->
+  <div id="customApiModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
+    <div class="card w-full max-w-md mx-4" style="max-height: 90vh; overflow-y: auto;">
+      <h3 class="text-lg font-bold mb-4">🔌 添加 Custom API</h3>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">备注名称 <span style="color: var(--text-muted);">（可选）</span></label>
+        <input id="caName" type="text" placeholder="例如：我的 OpenAI" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">API Base URL <span class="text-red-400">*</span></label>
+        <input id="caApiBase" type="text" placeholder="https://api.openai.com" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">API Key <span class="text-red-400">*</span></label>
+        <input id="caApiKey" type="password" placeholder="sk-..." class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">格式 <span class="text-red-400">*</span></label>
+        <select id="caFormat" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+          <option value="openai">openai</option>
+          <option value="claude">claude</option>
+        </select>
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">Provider <span style="color: var(--text-muted);">（可选，如 azure）</span></label>
+        <input id="caProvider" type="text" placeholder="azure" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <div class="mb-4">
+        <label class="text-sm font-medium mb-1 block">Model <span style="color: var(--text-muted);">（可选，留空使用请求中的模型）</span></label>
+        <input id="caModel" type="text" placeholder="claude-sonnet-4-6, claude-opus-4-6" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <p id="caError" class="text-sm text-red-400 mb-3" style="display: none;"></p>
+      <div class="flex justify-end gap-2">
+        <button onclick="hideCustomApiModal()" class="px-4 py-2 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border);">取消</button>
+        <button onclick="submitCustomApi()" class="btn-primary text-sm">添加</button>
+      </div>
+    </div>
+  </div>
+  <!-- Custom API 编辑弹窗 -->
+  <div id="editCustomApiModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
+    <div class="card w-full max-w-md mx-4" style="max-height: 90vh; overflow-y: auto;">
+      <h3 class="text-lg font-bold mb-4">✏️ 编辑 Custom API</h3>
+      <input type="hidden" id="editCustomApiId">
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">备注名称 <span style="color: var(--text-muted);">（可选）</span></label>
+        <input id="editCustomApiName" type="text" placeholder="例如：我的 OpenAI" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">API Base URL <span class="text-red-400">*</span></label>
+        <input id="editCustomApiBase" type="text" placeholder="https://api.openai.com" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">API Key <span style="color: var(--text-muted);">（可选，留空则不修改）</span></label>
+        <input id="editCustomApiKey" type="password" placeholder="留空则不修改" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">格式 <span class="text-red-400">*</span></label>
+        <select id="editCustomApiFormat" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+          <option value="openai">openai</option>
+          <option value="claude">claude</option>
+        </select>
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">Provider <span style="color: var(--text-muted);">（可选，如 azure）</span></label>
+        <input id="editCustomApiProvider" type="text" placeholder="azure" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <div class="mb-4">
+        <label class="text-sm font-medium mb-1 block">Model <span style="color: var(--text-muted);">（可选，逗号分隔多个模型）</span></label>
+        <input id="editCustomApiModel" type="text" placeholder="claude-sonnet-4-6, claude-opus-4-6" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+      </div>
+      <p id="editCaError" class="text-sm text-red-400 mb-3" style="display: none;"></p>
+      <div class="flex justify-end gap-2">
+        <button onclick="document.getElementById('editCustomApiModal').style.display='none'" class="px-4 py-2 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border);">取消</button>
+        <button onclick="submitEditCustomApi()" class="btn-primary text-sm">保存</button>
       </div>
     </div>
   </div>
@@ -4725,6 +4840,13 @@ def render_user_page(user) -> str:
       return percent.toFixed(digits) + '%';
     }}
 
+    function renderTokenUsage(t) {{
+      const cur = t.account_usage_current;
+      const lim = t.account_usage_limit;
+      if (cur == null || lim == null) return '<span style="color:var(--text-muted)">-</span>';
+      return `<span style="color:#a5b4fc;font-size:12px;">${{cur.toFixed(2)}} / ${{lim.toFixed(2)}}</span>`;
+    }}
+
     function applySelfUseMode() {{
       if (!SELF_USE_MODE) return;
       const publicOption = document.querySelector('#tokenVisibilityFilter option[value="public"]');
@@ -4843,6 +4965,7 @@ def render_user_page(user) -> str:
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       document.getElementById('panel-' + tab).style.display = 'block';
       document.getElementById('tab-' + tab).classList.add('active');
+      if (tab === 'custom-apis') loadCustomApis();
     }}
 
     // 自定义确认对话框
@@ -5046,6 +5169,84 @@ def render_user_page(user) -> str:
       }}
     }}
 
+    async function queryAccountInfo(tokenId) {{
+      const modal = document.getElementById('confirmModal');
+      const icon = document.getElementById('confirmIcon');
+      const title = document.getElementById('confirmTitle');
+      const msg = document.getElementById('confirmMessage');
+      const btn = document.getElementById('confirmBtn');
+      const cancelBtn = modal.querySelector('button.text-gray-400') || modal.querySelectorAll('button')[0];
+      const originalCancelDisplay = cancelBtn ? cancelBtn.style.display : '';
+
+      icon.innerHTML = '<svg class="animate-spin h-10 w-10 text-yellow-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>';
+      title.textContent = '查询余额中...';
+      msg.textContent = '正在连接 Kiro Portal，请稍候。';
+      btn.style.display = 'none';
+      if (cancelBtn) cancelBtn.style.display = 'none';
+      modal.style.display = 'flex';
+
+      try {{
+        const r = await fetch('/user/api/tokens/' + tokenId + '/account-info');
+        const d = await r.json();
+
+        btn.style.display = '';
+        if (cancelBtn) cancelBtn.style.display = originalCancelDisplay;
+
+        if (r.ok) {{
+          const usage = d.usage || {{}};
+          const sub = d.subscription || {{}};
+          const percent = usage.percent ?? 0;
+          const barColor = percent >= 90 ? '#ef4444' : percent >= 70 ? '#f59e0b' : '#22c55e';
+          const statusColor = d.status === 'Active' ? '#22c55e' : '#ef4444';
+
+          icon.textContent = '💰';
+          title.textContent = '账户余额';
+          btn.textContent = '好的';
+          btn.style.background = '#6366f1';
+          msg.innerHTML = `
+            <div style="text-align:left;font-size:13px;line-height:2;">
+              <div>📧 邮箱：<span style="color:#a5b4fc">${{d.email || '-'}}</span></div>
+              <div>🔖 订阅：<span style="color:#fbbf24">${{sub.title || sub.type || '-'}}</span></div>
+              <div>🟢 状态：<span style="color:${{statusColor}}">${{d.status || '-'}}</span></div>
+              <div style="margin-top:6px;">💳 用量：${{usage.current?.toFixed(2) ?? '-'}} / ${{usage.limit?.toFixed(2) ?? '-'}}</div>
+              <div style="margin:4px 0 2px;background:#374151;border-radius:4px;height:8px;overflow:hidden;">
+                <div style="width:${{Math.min(percent,100)}}%;height:100%;background:${{barColor}};border-radius:4px;transition:width 0.3s;"></div>
+              </div>
+              <div style="color:#9ca3af;font-size:12px;">${{percent}}% 已使用</div>
+              ${{usage.daysRemaining != null ? '<div style="margin-top:4px;">🔄 距重置：' + usage.daysRemaining + ' 天</div>' : ''}}
+            </div>
+          `;
+          confirmCallback = () => {{
+            document.getElementById('confirmModal').style.display = 'none';
+            confirmCallback = null;
+            loadTokens();
+          }};
+        }} else {{
+          icon.textContent = '❌';
+          title.textContent = '查询失败';
+          msg.textContent = d.error || '请求失败';
+          btn.textContent = '关闭';
+          btn.style.background = '#ef4444';
+          confirmCallback = () => {{
+            document.getElementById('confirmModal').style.display = 'none';
+            confirmCallback = null;
+          }};
+        }}
+      }} catch (e) {{
+        btn.style.display = '';
+        if (cancelBtn) cancelBtn.style.display = originalCancelDisplay;
+        icon.textContent = '❌';
+        title.textContent = '错误';
+        msg.textContent = '请求发生错误: ' + e.message;
+        btn.textContent = '关闭';
+        btn.style.background = '#ef4444';
+        confirmCallback = () => {{
+          document.getElementById('confirmModal').style.display = 'none';
+          confirmCallback = null;
+        }};
+      }}
+    }}
+
     async function refreshTokens() {{
       await loadTokens();
     }}
@@ -5101,11 +5302,12 @@ def render_user_page(user) -> str:
             <td class="py-3 px-3"><span class="${{t.visibility === 'public' ? 'text-green-400' : 'text-blue-400'}}">${{t.visibility === 'public' ? '公开' : '私有'}}</span></td>
             <td class="py-3 px-3">${{renderTokenStatus(t.status)}}</td>
             <td class="py-3 px-3">${{formatSuccessRate(t.success_rate)}}</td>
-            <td class="py-3 px-3">${{t.last_used ? new Date(t.last_used).toLocaleString() : '-'}}</td>
+            <td class="py-3 px-3">${{renderTokenUsage(t)}}</td>
             <td class="py-3 px-3">
               ${toggleBtn}
               <button onclick="userRefreshToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-teal-500/20 text-teal-400 hover:bg-teal-500/30 mr-1">验证</button>
               <button onclick="testToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 mr-1">测试</button>
+              <button onclick="queryAccountInfo(${{t.id}})" class="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 mr-1">余额</button>
               <button onclick="toggleOpus(${{t.id}}, ${{!opusEnabled}})" class="text-xs px-2 py-1 rounded ${{opusBtnClass}} hover:opacity-80 mr-1" title="标记为 Pro+ 账号（支持 Opus 4.5/4.6、Sonnet 4.6 模型）">${{opusBtnText}}</button>
               <button onclick="deleteToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
             </td>
@@ -5937,6 +6139,244 @@ def render_user_page(user) -> str:
     loadProfile();
     loadTokens();
     loadKeys();
+
+    // ── Custom API ──────────────────────────────────────────────────────────
+    let customApiCurrentPage = 1;
+    const customApiPageSize = 20;
+
+    function showCustomApiModal() {{
+      document.getElementById('caName').value = '';
+      document.getElementById('caApiBase').value = '';
+      document.getElementById('caApiKey').value = '';
+      document.getElementById('caFormat').value = 'openai';
+      document.getElementById('caProvider').value = '';
+      document.getElementById('caModel').value = '';
+      const err = document.getElementById('caError');
+      err.style.display = 'none';
+      err.textContent = '';
+      document.getElementById('customApiModal').style.display = 'flex';
+    }}
+
+    function hideCustomApiModal() {{
+      document.getElementById('customApiModal').style.display = 'none';
+    }}
+
+    async function submitCustomApi() {{
+      const apiBase = document.getElementById('caApiBase').value.trim();
+      const apiKey = document.getElementById('caApiKey').value.trim();
+      const format = document.getElementById('caFormat').value;
+      const name = document.getElementById('caName').value.trim();
+      const provider = document.getElementById('caProvider').value.trim();
+      const model = document.getElementById('caModel').value.trim();
+      const errEl = document.getElementById('caError');
+
+      if (!apiBase) {{ errEl.textContent = 'API Base URL 为必填项'; errEl.style.display = 'block'; return; }}
+      if (!apiKey) {{ errEl.textContent = 'API Key 为必填项'; errEl.style.display = 'block'; return; }}
+      errEl.style.display = 'none';
+
+      try {{
+        const r = await fetch('/user/api/custom-apis', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{
+            name: name || null,
+            api_base: apiBase,
+            api_key: apiKey,
+            format,
+            provider: provider || null,
+            model: model || null
+          }})
+        }});
+        const d = await r.json();
+        if (r.ok) {{
+          hideCustomApiModal();
+          loadCustomApis();
+        }} else {{
+          errEl.textContent = d.detail || d.error || '添加失败';
+          errEl.style.display = 'block';
+        }}
+      }} catch (e) {{
+        errEl.textContent = '请求失败，请稍后重试';
+        errEl.style.display = 'block';
+      }}
+    }}
+
+    async function loadCustomApis() {{
+      try {{
+        const r = await fetch('/user/api/custom-apis?page=' + customApiCurrentPage + '&page_size=' + customApiPageSize);
+        const d = await r.json();
+        renderCustomApiTable(d.accounts || []);
+        renderCustomApiPagination(d.total || 0, d.page || 1);
+      }} catch (e) {{
+        console.error(e);
+        document.getElementById('customApiTable').innerHTML = '<tr><td colspan="8" class="py-6 text-center" style="color: var(--text-muted);">加载失败</td></tr>';
+      }}
+    }}
+
+    // Cache account data by id to avoid embedding JSON in onclick attributes
+    const _customApiCache = {{}};
+
+    function renderCustomApiTable(accounts) {{
+      const tb = document.getElementById('customApiTable');
+      if (!accounts.length) {{
+        tb.innerHTML = '<tr><td colspan="8" class="py-8 text-center" style="color: var(--text-muted);"><div class="mb-3">还没有 Custom API 账号</div><button type="button" onclick="showCustomApiModal()" class="btn-primary text-sm px-3 py-1.5">+ 添加 Custom API</button></td></tr>';
+        document.getElementById('customApiPagination').style.display = 'none';
+        return;
+      }}
+      // Store accounts in cache keyed by id
+      accounts.forEach(a => {{ _customApiCache[a.id] = a; }});
+      tb.innerHTML = accounts.map(a => {{
+        const isActive = a.status === 'active';
+        const statusHtml = isActive
+          ? '<span class="text-green-400">启用</span>'
+          : '<span class="text-amber-400">禁用</span>';
+        const toggleLabel = isActive ? '禁用' : '启用';
+        const toggleClass = isActive ? 'bg-amber-500/20 text-amber-400' : 'bg-emerald-500/20 text-emerald-400';
+        const newStatus = isActive ? 'disabled' : 'active';
+        const nameDisplay = escapeHtml(a.name || '-');
+        const apiBaseDisplay = escapeHtml(a.api_base || '-');
+        const apiKeyDisplay = escapeHtml(a.api_key_masked || '****');
+        const formatDisplay = escapeHtml(a.format || '-');
+        const providerDisplay = escapeHtml(a.provider || '-');
+        const modelDisplay = escapeHtml(a.model || '-');
+        const useCount = (a.success_count || 0) + (a.fail_count || 0);
+        return `
+          <tr class="table-row">
+            <td class="py-3 px-3">
+              <div class="font-medium">${{nameDisplay}}</div>
+              <div class="text-xs mt-0.5" style="color: var(--text-muted);">${{apiBaseDisplay}}</div>
+            </td>
+            <td class="py-3 px-3"><code class="text-xs" style="color: var(--text-muted);">${{apiKeyDisplay}}</code></td>
+            <td class="py-3 px-3"><span class="text-indigo-400">${{formatDisplay}}</span></td>
+            <td class="py-3 px-3" style="color: var(--text-muted);">${{providerDisplay}}</td>
+            <td class="py-3 px-3" style="color: var(--text-muted);">${{modelDisplay}}</td>
+            <td class="py-3 px-3">${{statusHtml}}</td>
+            <td class="py-3 px-3 text-xs" style="color: var(--text-muted);">${{useCount}} 次</td>
+            <td class="py-3 px-3">
+              <button onclick="openEditCustomApiModal(${{a.id}})" class="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400 mr-1">编辑</button>
+              <button onclick="toggleCustomApiStatus(${{a.id}}, '${{newStatus}}')" class="text-xs px-2 py-1 rounded ${{toggleClass}} mr-1">${{toggleLabel}}</button>
+              <button onclick="deleteCustomApi(${{a.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
+            </td>
+          </tr>
+        `;
+      }}).join('');
+    }}
+
+    function renderCustomApiPagination(total, page) {{
+      const pagination = document.getElementById('customApiPagination');
+      const info = document.getElementById('customApiInfo');
+      const pages = document.getElementById('customApiPages');
+      if (total === 0) {{ pagination.style.display = 'none'; return; }}
+      pagination.style.display = 'flex';
+      const totalPages = Math.ceil(total / customApiPageSize) || 1;
+      const start = (page - 1) * customApiPageSize + 1;
+      const end = Math.min(page * customApiPageSize, total);
+      info.textContent = `显示 ${{start}}-${{end}} 条，共 ${{total}} 条`;
+      let html = '';
+      if (page > 1) html += `<button onclick="goCustomApiPage(${{page - 1}})" class="px-3 py-1 rounded text-sm" style="background: var(--bg-input);">上一页</button>`;
+      for (let i = 1; i <= totalPages; i++) {{
+        if (i === 1 || i === totalPages || (i >= page - 1 && i <= page + 1)) {{
+          html += `<button onclick="goCustomApiPage(${{i}})" class="px-3 py-1 rounded text-sm ${{i === page ? 'text-white' : ''}}" style="background: ${{i === page ? 'var(--primary)' : 'var(--bg-input)'}};">${{i}}</button>`;
+        }} else if (i === page - 2 || i === page + 2) {{
+          html += '<span class="px-2">...</span>';
+        }}
+      }}
+      if (page < totalPages) html += `<button onclick="goCustomApiPage(${{page + 1}})" class="px-3 py-1 rounded text-sm" style="background: var(--bg-input);">下一页</button>`;
+      pages.innerHTML = html;
+    }}
+
+    function goCustomApiPage(page) {{
+      customApiCurrentPage = page;
+      loadCustomApis();
+    }}
+
+    async function toggleCustomApiStatus(id, newStatus) {{
+      try {{
+        const r = await fetch('/user/api/custom-apis/' + id + '/status', {{
+          method: 'PATCH',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ status: newStatus }})
+        }});
+        if (r.ok) {{
+          loadCustomApis();
+        }} else {{
+          const d = await r.json();
+          alert(d.detail || d.error || '操作失败');
+        }}
+      }} catch (e) {{
+        alert('请求失败');
+      }}
+    }}
+
+    async function deleteCustomApi(id) {{
+      const confirmed = await showConfirmModal({{
+        title: '删除 Custom API',
+        message: '确定要删除此 Custom API 账号吗？删除后该账号将不再参与请求路由。',
+        icon: '🗑️',
+        confirmText: '确认删除',
+        danger: true
+      }});
+      if (!confirmed) return;
+      try {{
+        const r = await fetch('/user/api/custom-apis/' + id, {{ method: 'DELETE' }});
+        if (r.ok) {{
+          loadCustomApis();
+        }} else {{
+          const d = await r.json();
+          alert(d.detail || d.error || '删除失败');
+        }}
+      }} catch (e) {{
+        alert('请求失败');
+      }}
+    }}
+
+    function openEditCustomApiModal(id) {{
+      const account = _customApiCache[id];
+      if (!account) return;
+      document.getElementById('editCustomApiId').value = account.id;
+      document.getElementById('editCustomApiName').value = account.name || '';
+      document.getElementById('editCustomApiBase').value = account.api_base || '';
+      document.getElementById('editCustomApiKey').value = '';
+      document.getElementById('editCustomApiFormat').value = account.format || 'openai';
+      document.getElementById('editCustomApiProvider').value = account.provider || '';
+      document.getElementById('editCustomApiModel').value = account.model || '';
+      const errEl = document.getElementById('editCaError');
+      errEl.style.display = 'none';
+      errEl.textContent = '';
+      document.getElementById('editCustomApiModal').style.display = 'flex';
+    }}
+
+    async function submitEditCustomApi() {{
+      const id = document.getElementById('editCustomApiId').value;
+      const body = {{
+        name: document.getElementById('editCustomApiName').value || null,
+        api_base: document.getElementById('editCustomApiBase').value,
+        api_key: document.getElementById('editCustomApiKey').value || '',
+        format: document.getElementById('editCustomApiFormat').value,
+        provider: document.getElementById('editCustomApiProvider').value || null,
+        model: document.getElementById('editCustomApiModel').value || null,
+      }};
+      const errEl = document.getElementById('editCaError');
+      errEl.style.display = 'none';
+      try {{
+        const resp = await fetch('/user/api/custom-apis/' + id, {{
+          method: 'PUT',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify(body),
+        }});
+        if (resp.ok) {{
+          document.getElementById('editCustomApiModal').style.display = 'none';
+          loadCustomApis();
+        }} else {{
+          const data = await resp.json();
+          errEl.textContent = data.error || '更新失败';
+          errEl.style.display = 'block';
+        }}
+      }} catch (e) {{
+        errEl.textContent = '请求失败';
+        errEl.style.display = 'block';
+      }}
+    }}
   </script>
 </body>
 </html>'''

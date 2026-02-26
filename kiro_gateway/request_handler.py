@@ -67,6 +67,115 @@ except ImportError:
     debug_logger = None
 
 
+def _assemble_anthropic_response(sse_chunks: list, model: str) -> dict:
+    """
+    从 SSE 事件块列表中重建 Anthropic non-streaming 响应 JSON。
+
+    解析 message_start、content_block_delta、message_delta 等事件，
+    拼装成完整的 /v1/messages 响应格式。
+    """
+    response = {
+        "id": f"msg_{int(time.time())}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+
+    text_blocks: dict[int, str] = {}
+    thinking_blocks: dict[int, str] = {}
+    tool_use_blocks: dict[int, dict] = {}
+
+    for chunk in sse_chunks:
+        for line in chunk.splitlines():
+            if not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            etype = event.get("type", "")
+
+            if etype == "message_start":
+                msg = event.get("message", {})
+                if "id" in msg:
+                    response["id"] = msg["id"]
+                if "model" in msg:
+                    response["model"] = msg["model"]
+                usage = msg.get("usage", {})
+                if "input_tokens" in usage:
+                    response["usage"]["input_tokens"] = usage["input_tokens"]
+
+            elif etype == "content_block_start":
+                idx = event.get("index", 0)
+                block = event.get("content_block", {})
+                btype = block.get("type", "text")
+                if btype == "text":
+                    text_blocks[idx] = ""
+                elif btype == "thinking":
+                    thinking_blocks[idx] = block.get("thinking", "")
+                elif btype == "tool_use":
+                    tool_use_blocks[idx] = {
+                        "type": "tool_use",
+                        "id": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "input": {},
+                        "_input_json": "",
+                    }
+
+            elif etype == "content_block_delta":
+                idx = event.get("index", 0)
+                delta = event.get("delta", {})
+                dtype = delta.get("type", "")
+                if dtype == "text_delta" and idx in text_blocks:
+                    text_blocks[idx] += delta.get("text", "")
+                elif dtype == "thinking_delta" and idx in thinking_blocks:
+                    thinking_blocks[idx] += delta.get("thinking", "")
+                elif dtype == "input_json_delta" and idx in tool_use_blocks:
+                    tool_use_blocks[idx]["_input_json"] += delta.get("partial_json", "")
+
+            elif etype == "message_delta":
+                delta = event.get("delta", {})
+                if "stop_reason" in delta:
+                    response["stop_reason"] = delta["stop_reason"]
+                if "stop_sequence" in delta:
+                    response["stop_sequence"] = delta["stop_sequence"]
+                usage = event.get("usage", {})
+                if "output_tokens" in usage:
+                    response["usage"]["output_tokens"] = usage["output_tokens"]
+
+    # 按 index 顺序组装 content 块
+    all_indices = sorted(
+        set(list(text_blocks.keys()) + list(thinking_blocks.keys()) + list(tool_use_blocks.keys()))
+    )
+    for idx in all_indices:
+        if idx in thinking_blocks:
+            response["content"].append({"type": "thinking", "thinking": thinking_blocks[idx]})
+        if idx in text_blocks:
+            response["content"].append({"type": "text", "text": text_blocks[idx]})
+        if idx in tool_use_blocks:
+            block = tool_use_blocks[idx]
+            try:
+                input_data = json.loads(block["_input_json"]) if block["_input_json"] else {}
+            except json.JSONDecodeError:
+                input_data = {}
+            response["content"].append({
+                "type": "tool_use",
+                "id": block["id"],
+                "name": block["name"],
+                "input": input_data,
+            })
+
+    return response
+
+
 class RequestHandler:
     """
     请求处理器基类，封装公共逻辑。
@@ -430,6 +539,115 @@ class RequestHandler:
         return JSONResponse(content=collected_response)
 
     @staticmethod
+    async def _handle_custom_api(
+        request: Request,
+        request_data: Union[ChatCompletionRequest, AnthropicMessagesRequest],
+        account: dict,
+        response_format: str,
+        endpoint_name: str,
+    ) -> Union[StreamingResponse, JSONResponse]:
+        """
+        将请求路由到 Custom API 账号。
+
+        Args:
+            request: FastAPI Request
+            request_data: 请求数据（AnthropicMessagesRequest）
+            account: custom_api_accounts 记录（api_key 已解密）
+            response_format: 响应格式（"openai" 或 "anthropic"）
+            endpoint_name: 端点名称（用于日志）
+
+        Returns:
+            StreamingResponse 或 JSONResponse
+        """
+        from kiro_gateway.custom_api.handler import handle_custom_api_request
+        from kiro_gateway.database import user_db
+
+        # 将请求转换为 AnthropicMessagesRequest（如果还不是的话）
+        if isinstance(request_data, ChatCompletionRequest):
+            from kiro_gateway.converters import convert_anthropic_to_openai_request
+            # ChatCompletionRequest 已经是 OpenAI 格式，需要先转为 Anthropic
+            # 但 process_request 在 convert_to_openai=True 时才会转换
+            # 这里 request_data 应该已经是 AnthropicMessagesRequest
+            logger.warning("Custom API 路径收到 ChatCompletionRequest，预期 AnthropicMessagesRequest")
+
+        # 构建原始请求 dict（供 format=claude 透传使用）
+        raw_request_data = request_data.model_dump(exclude_none=True)
+
+        account_id = account.get("id")
+
+        def on_success(aid):
+            try:
+                user_db.increment_custom_api_success(aid)
+            except Exception as e:
+                logger.error(f"increment_custom_api_success 失败: {e}")
+
+        def on_fail(aid):
+            try:
+                user_db.increment_custom_api_fail(aid)
+            except Exception as e:
+                logger.error(f"increment_custom_api_fail 失败: {e}")
+
+        logger.info(
+            f"Custom API 路由: 账号 {account_id}, format={account.get('format')}, "
+            f"provider={account.get('provider')}, endpoint={endpoint_name}"
+        )
+
+        if request_data.stream:
+            async def stream_wrapper():
+                try:
+                    async for chunk in handle_custom_api_request(
+                        account=account,
+                        claude_req=request_data,
+                        request_data=raw_request_data,
+                        on_success=on_success,
+                        on_fail=on_fail,
+                    ):
+                        yield chunk
+                except Exception as e:
+                    error_msg = str(e) if str(e) else repr(e)
+                    logger.error(f"Custom API 流式错误: {error_msg}")
+                    on_fail(account_id)
+
+            return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
+        else:
+            # 非流式：收集所有 SSE 事件，拼装成完整响应
+            # 强制 stream=True 向上游请求，然后在本地收集
+            import copy
+            streaming_request = copy.copy(request_data)
+            streaming_request.stream = True
+            raw_streaming = streaming_request.model_dump(exclude_none=True)
+
+            chunks = []
+            try:
+                async for chunk in handle_custom_api_request(
+                    account=account,
+                    claude_req=streaming_request,
+                    request_data=raw_streaming,
+                    on_success=on_success,
+                    on_fail=on_fail,
+                ):
+                    chunks.append(chunk)
+            except Exception as e:
+                error_msg = str(e) if str(e) else repr(e)
+                logger.error(f"Custom API 非流式错误: {error_msg}")
+                if response_format == "anthropic":
+                    return JSONResponse(
+                        status_code=502,
+                        content={"type": "error", "error": {"type": "api_error", "message": error_msg}}
+                    )
+                else:
+                    return JSONResponse(
+                        status_code=502,
+                        content={"error": {"message": error_msg, "type": "api_error", "code": 502}}
+                    )
+
+            # 从 SSE 事件流中提取最终的 message_stop 或 content
+            # 返回原始 SSE 内容拼接（客户端期望非流式时返回完整 JSON）
+            # 解析 SSE 流，重建 Anthropic non-streaming 响应
+            assembled = _assemble_anthropic_response(chunks, request_data.model)
+            return JSONResponse(content=assembled)
+
+    @staticmethod
     async def process_request(
         request: Request,
         request_data: Union[ChatCompletionRequest, AnthropicMessagesRequest],
@@ -463,16 +681,24 @@ class RequestHandler:
             # Deferred token selection based on model
             from kiro_gateway.token_allocator import token_allocator, NoTokenAvailable
             try:
-                donated_token, auth_manager = await token_allocator.get_best_token(
+                account_type, account_data, auth_manager = await token_allocator.get_best_token(
                     user_id=user_id,
                     model=request_data.model
                 )
-                request.state.auth_manager = auth_manager
-                request.state.donated_token_id = donated_token.id
-                logger.info(f"延迟 Token 选择: 用户 {user_id}, 模型 {request_data.model}, Token {donated_token.id}")
             except NoTokenAvailable as e:
                 logger.warning(f"用户可用 Token 不足: 用户ID={user_id}, 模型={request_data.model}, 错误={e}")
                 raise HTTPException(status_code=503, detail="该用户暂无可用的 Token")
+
+            if account_type == 'custom_api':
+                # Route to Custom API
+                return await RequestHandler._handle_custom_api(
+                    request, request_data, account_data, response_format, endpoint_name
+                )
+
+            # Kiro token path
+            request.state.auth_manager = auth_manager
+            request.state.donated_token_id = account_data.id
+            logger.info(f"延迟 Token 选择: 用户 {user_id}, 模型 {request_data.model}, Token {account_data.id}")
 
         # Use auth_manager from request.state if available (multi-tenant mode)
         # Otherwise fall back to global auth_manager

@@ -9,7 +9,7 @@ KiroGate 智能 Token 分配器。
 import asyncio
 import random
 import time
-from typing import Optional, Tuple, List
+from typing import Any, Optional, Tuple, List
 
 from loguru import logger
 
@@ -43,6 +43,14 @@ def is_opus_model(model: str) -> bool:
 class NoTokenAvailable(Exception):
     """No active token available for allocation."""
     pass
+
+
+def _account_matches_model(account: dict, model: str) -> bool:
+    """判断 Custom API 账号是否绑定了指定模型（逗号分隔，精确匹配，忽略首尾空格）。"""
+    raw = (account.get("model") or "").strip()
+    if not raw:
+        return False
+    return model in {m.strip() for m in raw.split(",")}
 
 
 class SmartTokenAllocator:
@@ -153,24 +161,25 @@ class SmartTokenAllocator:
         self._reset_recent_usage_if_needed()
         self._recent_usage[token_id] = self._recent_usage.get(token_id, 0) + 1
 
-    async def get_best_token(self, user_id: Optional[int] = None, model: Optional[str] = None) -> Tuple[DonatedToken, KiroAuthManager]:
+    async def get_best_token(self, user_id: Optional[int] = None, model: Optional[str] = None) -> Tuple[str, Any, Optional[KiroAuthManager]]:
         """
-        获取最优 Token。
+        获取最优 Token 或 Custom API 账号。
 
-        对于有用户的请求，优先使用用户自己的私有 Token。
-        否则使用公共 Token 池。
-        
-        如果请求的是 Opus 模型，优先使用 opus_enabled=True 的 Token。
+        对于有用户的请求，将用户的私有 Kiro Token 和 Custom API 账号合并后随机选择。
+        否则使用公共 Token 池（仅 Kiro Token）。
 
         Args:
             user_id: 用户 ID（可选）
             model: 请求的模型名称（可选）
 
         Returns:
-            (DonatedToken, KiroAuthManager) tuple
+            (account_type, account_data, manager) tuple
+            - account_type: 'kiro' 或 'custom_api'
+            - account_data: DonatedToken（kiro）或 dict（custom_api）
+            - manager: KiroAuthManager（kiro）或 None（custom_api）
 
         Raises:
-            NoTokenAvailable: 无可用 Token
+            NoTokenAvailable: 无可用 Token 或账号
         """
         from kiro_gateway.metrics import metrics
         self_use_enabled = metrics.is_self_use_enabled()
@@ -179,44 +188,84 @@ class SmartTokenAllocator:
         requesting_pro_plus = requires_pro_plus(model) if model else False
 
         if user_id:
-            # 用户请求: 优先使用用户自己的私有 Token
-            # 使用 limit=None 获取所有 token，避免分页导致遗漏
+            # 用户请求: 获取用户的私有 Kiro Token
             user_tokens = user_db.get_user_tokens(user_id, limit=None)
             
-            # 打印所有用户 token 的详细信息（用于调试 Pro+ 选择问题）
             logger.info(f"用户 {user_id} 的所有 Token: {[(t.id, t.status, t.visibility, t.opus_enabled) for t in user_tokens]}")
             
-            active_tokens = [
+            active_kiro_tokens = [
                 t for t in user_tokens
                 if t.status == "active" and (not self_use_enabled or t.visibility == "private")
             ]
             
-            # 打印筛选后的 token
-            logger.info(f"用户 {user_id} 的活跃 Token (self_use={self_use_enabled}): {[(t.id, t.opus_enabled) for t in active_tokens]}")
-            
-            if active_tokens:
-                # 如果请求 Pro+ 专属模型，优先选择 opus_enabled (Pro+) 的 Token
-                if requesting_pro_plus:
-                    pro_tokens = [t for t in active_tokens if t.opus_enabled]
-                    if pro_tokens:
+            logger.info(f"用户 {user_id} 的活跃 Kiro Token (self_use={self_use_enabled}): {[(t.id, t.opus_enabled) for t in active_kiro_tokens]}")
+
+            # 获取用户的 active Custom API 账号
+            custom_api_accounts = user_db.get_active_custom_api_accounts_by_user(user_id)
+            logger.info(f"用户 {user_id} 的活跃 Custom API 账号: {len(custom_api_accounts)} 个")
+
+            # 如果请求 Pro+ 专属模型，合并 Pro+ Kiro Token 和绑定该模型的 Custom API 账号
+            if requesting_pro_plus:
+                pro_tokens = [t for t in active_kiro_tokens if t.opus_enabled]
+                pro_custom = [a for a in custom_api_accounts if _account_matches_model(a, model)]
+
+                if pro_tokens or pro_custom:
+                    logger.info(
+                        f"Pro+ 轮询: 用户 {user_id} 有 {len(pro_tokens)} 个 Pro+ Token, "
+                        f"{len(pro_custom)} 个绑定了 {model} 的 Custom API 账号"
+                    )
+                    if pro_tokens and pro_custom:
+                        if random.random() < len(pro_tokens) / (len(pro_tokens) + len(pro_custom)):
+                            best = self._weighted_random_choice(pro_tokens)
+                            self._record_recent_usage(best.id)
+                            logger.info(f"Pro+ 轮询: 选择了 Kiro Token {best.id}")
+                            manager = await self._get_manager(best)
+                            return 'kiro', best, manager
+                        else:
+                            account = random.choice(pro_custom)
+                            logger.info(f"Pro+ 轮询: 选择了 Custom API 账号 {account['id']}")
+                            return 'custom_api', account, None
+                    elif pro_tokens:
                         best = self._weighted_random_choice(pro_tokens)
                         self._record_recent_usage(best.id)
-                        logger.info(f"Token 分配 (Pro+): 用户 {user_id} 从 {len(pro_tokens)} 个 Pro+ Token 中选择了 Token {best.id}")
+                        logger.info(f"Pro+ 轮询: 选择了 Kiro Token {best.id}")
                         manager = await self._get_manager(best)
-                        return best, manager
+                        return 'kiro', best, manager
                     else:
-                        logger.warning(f"用户 {user_id} 没有 Pro+ Token，将使用普通 Token")
-                
-                best = self._weighted_random_choice(active_tokens)
-                self._record_recent_usage(best.id)
-                logger.info(f"Token 分配: 用户 {user_id} 从 {len(active_tokens)} 个私有 Token 中选择了 Token {best.id}")
-                manager = await self._get_manager(best)
-                return best, manager
+                        account = random.choice(pro_custom)
+                        logger.info(f"Pro+ 轮询: 选择了 Custom API 账号 {account['id']}")
+                        return 'custom_api', account, None
+                else:
+                    logger.warning(
+                        f"用户 {user_id} 没有 Pro+ Token 也没有绑定 {model} 的 Custom API 账号，"
+                        f"回退到全量池"
+                    )
+                    # fall through to full pool below
+
+            # 合并 Kiro Token 和 Custom API 账号，随机选择
+            all_candidates = (
+                [('kiro', t) for t in active_kiro_tokens] +
+                [('custom_api', a) for a in custom_api_accounts]
+            )
+
+            if all_candidates:
+                account_type, account_data = random.choice(all_candidates)
+                if account_type == 'kiro':
+                    self._record_recent_usage(account_data.id)
+                    logger.info(f"Token 分配: 用户 {user_id} 选择了 Kiro Token {account_data.id} (共 {len(all_candidates)} 个候选)")
+                    manager = await self._get_manager(account_data)
+                    return 'kiro', account_data, manager
+                else:
+                    logger.info(f"Token 分配: 用户 {user_id} 选择了 Custom API 账号 {account_data['id']} (共 {len(all_candidates)} 个候选)")
+                    return 'custom_api', account_data, None
+
+            # 用户没有任何可用账号，不回退到公共池
+            raise NoTokenAvailable(f"用户 {user_id} 没有可用的 Token 或 Custom API 账号")
 
         if self_use_enabled:
             raise NoTokenAvailable("Self-use mode: public token pool is disabled")
 
-        # 使用公共 Token 池
+        # 使用公共 Token 池（仅 Kiro Token，不含 Custom API）
         public_tokens = user_db.get_public_tokens()
         if not public_tokens:
             raise NoTokenAvailable("No public tokens available")
@@ -229,7 +278,6 @@ class SmartTokenAllocator:
         ]
 
         if not good_tokens:
-            # 如果没有好的Token，使用所有可用的
             good_tokens = public_tokens
 
         # 如果请求 Pro+ 专属模型，优先选择 Pro+ Token
@@ -240,7 +288,7 @@ class SmartTokenAllocator:
                 self._record_recent_usage(best.id)
                 logger.info(f"Token 分配 (Pro+): 从 {len(pro_tokens)} 个 Pro+ Token 中选择了 Token {best.id}")
                 manager = await self._get_manager(best)
-                return best, manager
+                return 'kiro', best, manager
             else:
                 logger.warning(f"公共池没有 Pro+ Token，将使用普通 Token")
 
@@ -251,7 +299,7 @@ class SmartTokenAllocator:
         logger.info(f"Token 分配: 从 {len(good_tokens)} 个可用 Token 中选择了 Token {best.id}")
         
         manager = await self._get_manager(best)
-        return best, manager
+        return 'kiro', best, manager
 
     async def _get_manager(self, token: DonatedToken) -> KiroAuthManager:
         """获取或创建 Token 对应的 AuthManager（线程安全）。"""

@@ -169,6 +169,21 @@ class UserDatabase:
             if "opus_enabled" not in columns:
                 logger.info("Adding 'opus_enabled' column to tokens table")
                 conn.execute("ALTER TABLE tokens ADD COLUMN opus_enabled INTEGER DEFAULT 0")
+            if "account_email" not in columns:
+                logger.info("Adding 'account_email' column to tokens table")
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_email TEXT")
+            if "account_subscription" not in columns:
+                logger.info("Adding 'account_subscription' column to tokens table")
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_subscription TEXT")
+            if "account_usage_current" not in columns:
+                logger.info("Adding 'account_usage_current' column to tokens table")
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_usage_current REAL")
+            if "account_usage_limit" not in columns:
+                logger.info("Adding 'account_usage_limit' column to tokens table")
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_usage_limit REAL")
+            if "account_checked_at" not in columns:
+                logger.info("Adding 'account_checked_at' column to tokens table")
+                conn.execute("ALTER TABLE tokens ADD COLUMN account_checked_at INTEGER")
             
             conn.executescript('''
 
@@ -271,6 +286,28 @@ class UserDatabase:
                 conn.execute(
                     "ALTER TABLE announcements ADD COLUMN allow_guest INTEGER DEFAULT 0"
                 )
+
+            # Custom API accounts table (migration: create if not exists)
+            conn.executescript('''
+                CREATE TABLE IF NOT EXISTS custom_api_accounts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT,
+                    api_base TEXT NOT NULL,
+                    api_key_encrypted TEXT NOT NULL,
+                    format TEXT NOT NULL DEFAULT 'openai',
+                    provider TEXT,
+                    model TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    success_count INTEGER DEFAULT 0,
+                    fail_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_custom_api_user ON custom_api_accounts(user_id);
+                CREATE INDEX IF NOT EXISTS idx_custom_api_status ON custom_api_accounts(user_id, status);
+            ''')
+
             conn.commit()
         logger.info(f"User database initialized: {self._db_path}")
 
@@ -929,6 +966,30 @@ class UserDatabase:
                 ).fetchall()
             return [self._row_to_token(r) for r in rows]
 
+    def update_token_account_info(
+        self,
+        token_id: int,
+        email: Optional[str],
+        subscription: Optional[str],
+        usage_current: Optional[float],
+        usage_limit: Optional[float],
+    ) -> bool:
+        """缓存账户余额和订阅信息到数据库。"""
+        now = int(time.time() * 1000)
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    """UPDATE tokens SET
+                        account_email = ?,
+                        account_subscription = ?,
+                        account_usage_current = ?,
+                        account_usage_limit = ?,
+                        account_checked_at = ?
+                       WHERE id = ?""",
+                    (email, subscription, usage_current, usage_limit, now, token_id)
+                )
+                return cursor.rowcount > 0
+
     def delete_token(self, token_id: int, user_id: Optional[int] = None) -> bool:
         """Delete a token. If user_id provided, verify ownership."""
         with self._lock:
@@ -1472,6 +1533,276 @@ class UserDatabase:
             with self._get_conn() as conn:
                 conn.execute("DELETE FROM tokens WHERE id = ?", (token_id,))
                 return True
+
+    # -------------------------------------------------------------------------
+    # Custom API Accounts — User CRUD
+    # -------------------------------------------------------------------------
+
+    def add_custom_api_account(
+        self,
+        user_id: int,
+        name: Optional[str],
+        api_base: str,
+        api_key: str,
+        format: str,
+        provider: Optional[str],
+        model: Optional[str],
+    ) -> int:
+        """Add a custom API account for a user. Returns the new account id."""
+        encrypted = self._encrypt_token(api_key)
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    """INSERT INTO custom_api_accounts
+                       (user_id, name, api_base, api_key_encrypted, format, provider, model)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (user_id, name, api_base, encrypted, format, provider, model),
+                )
+                return cursor.lastrowid
+
+    def get_custom_api_accounts_by_user(
+        self, user_id: int, page: int = 1, page_size: int = 20
+    ) -> List[Dict]:
+        """Return paginated list of accounts for a user (api_key masked)."""
+        offset = (page - 1) * page_size
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, user_id, name, api_base, api_key_encrypted,
+                          format, provider, model, status,
+                          success_count, fail_count, created_at
+                   FROM custom_api_accounts
+                   WHERE user_id = ?
+                   ORDER BY id DESC
+                   LIMIT ? OFFSET ?""",
+                (user_id, page_size, offset),
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                plain = self._decrypt_token(row[4])
+                masked = plain[:4] + "****" if len(plain) >= 4 else "****"
+            except Exception:
+                masked = "****"
+            result.append({
+                "id": row[0],
+                "user_id": row[1],
+                "name": row[2],
+                "api_base": row[3],
+                "api_key_masked": masked,
+                "format": row[5],
+                "provider": row[6],
+                "model": row[7],
+                "status": row[8],
+                "success_count": row[9],
+                "fail_count": row[10],
+                "created_at": row[11],
+            })
+        return result
+
+    def get_active_custom_api_accounts_by_user(self, user_id: int) -> List[Dict]:
+        """Return all active accounts for a user with decrypted api_key (for routing)."""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, user_id, name, api_base, api_key_encrypted,
+                          format, provider, model, status,
+                          success_count, fail_count, created_at
+                   FROM custom_api_accounts
+                   WHERE user_id = ? AND status = 'active'
+                   ORDER BY id""",
+                (user_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                api_key = self._decrypt_token(row[4])
+            except Exception:
+                continue  # skip accounts with corrupted keys
+            result.append({
+                "id": row[0],
+                "user_id": row[1],
+                "name": row[2],
+                "api_base": row[3],
+                "api_key": api_key,
+                "format": row[5],
+                "provider": row[6],
+                "model": row[7],
+                "status": row[8],
+                "success_count": row[9],
+                "fail_count": row[10],
+                "created_at": row[11],
+            })
+        return result
+
+    def update_custom_api_account_status(
+        self, account_id: int, user_id: int, status: str
+    ) -> bool:
+        """Enable or disable an account (user-scoped)."""
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "UPDATE custom_api_accounts SET status = ? WHERE id = ? AND user_id = ?",
+                    (status, account_id, user_id),
+                )
+                return cursor.rowcount > 0
+
+    def delete_custom_api_account(self, account_id: int, user_id: int) -> bool:
+        """Delete an account (user-scoped)."""
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM custom_api_accounts WHERE id = ? AND user_id = ?",
+                    (account_id, user_id),
+                )
+                return cursor.rowcount > 0
+
+    def update_custom_api_account(
+        self,
+        account_id: int,
+        user_id: int,
+        name: Optional[str] = None,
+        api_base: Optional[str] = None,
+        api_key: Optional[str] = None,
+        format: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> bool:
+        """
+        Update fields of a custom API account (user-scoped).
+
+        Only non-None fields are updated. api_key='' means keep original.
+        Returns True on success, False if account not found or not owned by user.
+        """
+        set_clauses = []
+        params = []
+
+        if name is not None:
+            set_clauses.append("name = ?")
+            params.append(name)
+        if api_base is not None:
+            set_clauses.append("api_base = ?")
+            params.append(api_base)
+        if api_key is not None and api_key != "":
+            set_clauses.append("api_key_encrypted = ?")
+            params.append(self._encrypt_token(api_key))
+        if format is not None:
+            set_clauses.append("format = ?")
+            params.append(format)
+        if provider is not None:
+            set_clauses.append("provider = ?")
+            params.append(provider)
+        if model is not None:
+            set_clauses.append("model = ?")
+            params.append(model)
+
+        # Nothing to update — idempotent success
+        if not set_clauses:
+            return True
+
+        params.extend([account_id, user_id])
+        sql = f"UPDATE custom_api_accounts SET {', '.join(set_clauses)} WHERE id = ? AND user_id = ?"
+
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(sql, params)
+                return cursor.rowcount > 0
+
+    def increment_custom_api_success(self, account_id: int) -> None:
+        """Increment success counter for an account."""
+        with self._lock:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE custom_api_accounts SET success_count = success_count + 1 WHERE id = ?",
+                    (account_id,),
+                )
+
+    def increment_custom_api_fail(self, account_id: int) -> None:
+        """Increment fail counter for an account."""
+        with self._lock:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE custom_api_accounts SET fail_count = fail_count + 1 WHERE id = ?",
+                    (account_id,),
+                )
+
+    # -------------------------------------------------------------------------
+    # Custom API Accounts — Admin CRUD
+    # -------------------------------------------------------------------------
+
+    def admin_get_all_custom_api_accounts(
+        self, page: int = 1, page_size: int = 20
+    ) -> List[Dict]:
+        """Admin: return paginated list of all accounts (api_key masked, includes username)."""
+        offset = (page - 1) * page_size
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT c.id, c.user_id, u.username, c.name, c.api_base,
+                          c.api_key_encrypted, c.format, c.provider, c.model,
+                          c.status, c.success_count, c.fail_count, c.created_at
+                   FROM custom_api_accounts c
+                   LEFT JOIN users u ON c.user_id = u.id
+                   ORDER BY c.id DESC
+                   LIMIT ? OFFSET ?""",
+                (page_size, offset),
+            ).fetchall()
+        result = []
+        for row in rows:
+            try:
+                plain = self._decrypt_token(row[5])
+                masked = plain[:4] + "****" if len(plain) >= 4 else "****"
+            except Exception:
+                masked = "****"
+            result.append({
+                "id": row[0],
+                "user_id": row[1],
+                "username": row[2],
+                "name": row[3],
+                "api_base": row[4],
+                "api_key_masked": masked,
+                "format": row[6],
+                "provider": row[7],
+                "model": row[8],
+                "status": row[9],
+                "success_count": row[10],
+                "fail_count": row[11],
+                "created_at": row[12],
+            })
+        return result
+
+    def admin_delete_custom_api_account(self, account_id: int) -> bool:
+        """Admin: delete any custom API account regardless of ownership."""
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM custom_api_accounts WHERE id = ?", (account_id,)
+                )
+                return cursor.rowcount > 0
+
+    def admin_update_custom_api_account_status(
+        self, account_id: int, status: str
+    ) -> bool:
+        """Admin: enable or disable any custom API account."""
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(
+                    "UPDATE custom_api_accounts SET status = ? WHERE id = ?",
+                    (status, account_id),
+                )
+                return cursor.rowcount > 0
+
+    def get_custom_api_accounts_count_by_user(self, user_id: int) -> int:
+        """Return total count of custom API accounts for a user."""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM custom_api_accounts WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            return row[0] if row else 0
+
+    def admin_get_all_custom_api_accounts_count(self) -> int:
+        """Admin: return total count of all custom API accounts."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM custom_api_accounts").fetchone()
+            return row[0] if row else 0
 
 
 # Global database instance

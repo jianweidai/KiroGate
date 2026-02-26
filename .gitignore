@@ -6,6 +6,7 @@
 .vscode/
 .idea/
 .shard/
+.kiro/specs/**/.config.kiro
 
 # Python
 __pycache__/
@@ -29,6 +30,7 @@ requests/
 .pytest_cache/
 .coverage
 htmlcov/
+.hypothesis/
 
 # Data files
 data/

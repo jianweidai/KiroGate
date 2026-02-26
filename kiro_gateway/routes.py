@@ -35,6 +35,8 @@ import secrets
 import shutil
 import sqlite3
 import tempfile
+import time
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,6 +44,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+import cbor2
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security, Header, Form, Query, File, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, RedirectResponse
@@ -2677,6 +2680,23 @@ async def user_get_tokens(
         status=status,
         visibility=visibility
     )
+    # 拿 account info 缓存字段（不在 DonatedToken dataclass 里，单独查）
+    token_ids = [t.id for t in tokens]
+    account_info_map: dict = {}
+    if token_ids:
+        placeholders = ",".join("?" * len(token_ids))
+        with user_db._get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, account_usage_current, account_usage_limit, account_checked_at "
+                f"FROM tokens WHERE id IN ({placeholders})",
+                token_ids
+            ).fetchall()
+            for row in rows:
+                account_info_map[row[0]] = {
+                    "account_usage_current": row[1],
+                    "account_usage_limit": row[2],
+                    "account_checked_at": row[3],
+                }
     return {
         "tokens": [
             {
@@ -2690,6 +2710,11 @@ async def user_get_tokens(
                 "last_used": t.last_used,
                 "created_at": t.created_at,
                 "opus_enabled": t.opus_enabled,
+                **account_info_map.get(t.id, {
+                    "account_usage_current": None,
+                    "account_usage_limit": None,
+                    "account_checked_at": None,
+                }),
             }
             for t in tokens
         ],
@@ -2788,21 +2813,28 @@ def _extract_refresh_tokens(payload: object) -> tuple[list[TokenCredential], int
         client_id = None
         client_secret = None
         
-        # 直接字段
+        # 直接字段（支持驼峰和蛇形命名）
         if "refreshToken" in obj:
             refresh_token = obj.get("refreshToken")
-        # 嵌套在 credentials 中
+        elif "refresh_token" in obj:
+            refresh_token = obj.get("refresh_token")
+        # 嵌套在 credentials 或 credentials_kiro_rs 中
         elif isinstance(obj.get("credentials"), dict):
             creds = obj["credentials"]
-            refresh_token = creds.get("refreshToken")
-            client_id = creds.get("clientId")
-            client_secret = creds.get("clientSecret")
-        
-        # 获取 clientId 和 clientSecret（如果在顶层）
+            refresh_token = creds.get("refreshToken") or creds.get("refresh_token")
+            client_id = creds.get("clientId") or creds.get("client_id")
+            client_secret = creds.get("clientSecret") or creds.get("client_secret")
+        elif isinstance(obj.get("credentials_kiro_rs"), dict):
+            creds = obj["credentials_kiro_rs"]
+            refresh_token = creds.get("refreshToken") or creds.get("refresh_token")
+            client_id = creds.get("clientId") or creds.get("client_id")
+            client_secret = creds.get("clientSecret") or creds.get("client_secret")
+
+        # 获取 clientId 和 clientSecret（如果在顶层，支持两种命名）
         if client_id is None:
-            client_id = obj.get("clientId")
+            client_id = obj.get("clientId") or obj.get("client_id")
         if client_secret is None:
-            client_secret = obj.get("clientSecret")
+            client_secret = obj.get("clientSecret") or obj.get("client_secret")
         
         if not refresh_token or not isinstance(refresh_token, str):
             record_missing(path, "缺少 refreshToken")
@@ -2827,14 +2859,20 @@ def _extract_refresh_tokens(payload: object) -> tuple[list[TokenCredential], int
             client_secret=client_secret if auth_type == "idc" else None,
         ))
 
+    def _has_refresh_token(obj: dict) -> bool:
+        """检查对象是否包含 refreshToken（支持驼峰和蛇形命名）"""
+        if "refreshToken" in obj or "refresh_token" in obj:
+            return True
+        creds = obj.get("credentials") or obj.get("credentials_kiro_rs")
+        if isinstance(creds, dict) and ("refreshToken" in creds or "refresh_token" in creds):
+            return True
+        return False
+
     def handle_list(items: list, path: str, enforce_required: bool) -> None:
         for index, item in enumerate(items):
             item_path = f"{path}[{index}]"
             if isinstance(item, dict):
-                if "refreshToken" in item or (
-                    isinstance(item.get("credentials"), dict)
-                    and "refreshToken" in item["credentials"]
-                ):
+                if _has_refresh_token(item):
                     add_credential(item, item_path)
                 else:
                     if enforce_required:
@@ -2849,12 +2887,9 @@ def _extract_refresh_tokens(payload: object) -> tuple[list[TokenCredential], int
                     record_missing(item_path, "类型不支持")
 
     def handle_dict(obj: dict, path: str) -> None:
-        # 检查顶层是否有 refreshToken
-        if "refreshToken" in obj or (
-            isinstance(obj.get("credentials"), dict)
-            and "refreshToken" in obj["credentials"]
-        ):
-            add_credential(obj, path)
+        # 检查顶层是否有 refreshToken（支持两种命名）
+        if _has_refresh_token(obj):
+            add_credential(obj, path if path else "root")
             return
 
         for key, value in obj.items():
@@ -3142,6 +3177,199 @@ async def user_donate_token(
     )
     return {"success": success, "message": message}
 
+
+
+
+# ============================================================================
+# Kiro Portal API - 账号余额查询
+# ============================================================================
+
+KIRO_PORTAL_API_BASE = "https://app.kiro.dev/service/KiroWebPortalService/operation"
+
+
+async def _kiro_portal_request(operation: str, body: dict, access_token: str, idp: str = "BuilderId") -> dict:
+    """调用 Kiro Portal API（CBOR 格式）。"""
+    headers = {
+        "accept": "application/cbor",
+        "content-type": "application/cbor",
+        "smithy-protocol": "rpc-v2-cbor",
+        "amz-sdk-invocation-id": str(uuid.uuid4()),
+        "amz-sdk-request": "attempt=1; max=1",
+        "x-amz-user-agent": "aws-sdk-js/1.0.0 kirogate/1.0.0",
+        "authorization": f"Bearer {access_token}",
+        "cookie": f"Idp={idp}; AccessToken={access_token}",
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{KIRO_PORTAL_API_BASE}/{operation}",
+            headers=headers,
+            content=cbor2.dumps(body),
+            timeout=30.0,
+        )
+        if not response.is_success:
+            error_message = f"HTTP {response.status_code}"
+            try:
+                error_data = cbor2.loads(response.content)
+                if error_data.get("__type") and error_data.get("message"):
+                    error_type = error_data["__type"].split("#")[-1]
+                    error_message = f"{error_type}: {error_data['message']}"
+                elif error_data.get("message"):
+                    error_message = error_data["message"]
+            except Exception:
+                pass
+            raise HTTPException(status_code=response.status_code, detail=error_message)
+        return cbor2.loads(response.content)
+
+
+async def _get_kiro_account_info(access_token: str) -> dict:
+    """获取账号用量和订阅信息，自动尝试多个 idp。"""
+    idp_list = ["Github", "Google", "BuilderId"]
+    last_error = None
+    usage_data = None
+    used_idp = "BuilderId"
+
+    for try_idp in idp_list:
+        try:
+            usage_data = await _kiro_portal_request(
+                "GetUserUsageAndLimits",
+                {"isEmailRequired": True, "origin": "KIRO_IDE"},
+                access_token,
+                try_idp,
+            )
+            used_idp = try_idp
+            break
+        except HTTPException as e:
+            last_error = e
+            if e.status_code in (401, 403):
+                continue
+            raise
+    else:
+        raise last_error or HTTPException(status_code=401, detail="Authentication failed")
+
+    # 获取用户状态
+    user_status = "Active"
+    try:
+        user_info = await _kiro_portal_request(
+            "GetUserInfo", {"origin": "KIRO_IDE"}, access_token, used_idp
+        )
+        user_status = user_info.get("status", "Active")
+    except Exception as e:
+        if "AccountSuspendedException" in str(e) or "423" in str(e):
+            user_status = "Suspended"
+
+    # 解析 Credits 用量
+    credit_usage = None
+    for item in usage_data.get("usageBreakdownList", []):
+        if item.get("resourceType") == "CREDIT":
+            credit_usage = item
+            break
+
+    subscription_title = usage_data.get("subscriptionInfo", {}).get("subscriptionTitle", "Free")
+    subscription_type = "Free"
+    upper = subscription_title.upper()
+    if "PRO_PLUS" in upper or "PRO+" in upper:
+        subscription_type = "Pro+"
+    elif "PRO" in upper:
+        subscription_type = "Pro"
+    elif "ENTERPRISE" in upper:
+        subscription_type = "Enterprise"
+    elif "TEAMS" in upper:
+        subscription_type = "Teams"
+
+    base_limit = (credit_usage.get("usageLimitWithPrecision") or credit_usage.get("usageLimit", 0)) if credit_usage else 0
+    base_current = (credit_usage.get("currentUsageWithPrecision") or credit_usage.get("currentUsage", 0)) if credit_usage else 0
+
+    free_trial_limit = 0
+    free_trial_current = 0
+    if credit_usage and credit_usage.get("freeTrialInfo", {}).get("freeTrialStatus") == "ACTIVE":
+        ft = credit_usage["freeTrialInfo"]
+        free_trial_limit = ft.get("usageLimitWithPrecision") or ft.get("usageLimit", 0)
+        free_trial_current = ft.get("currentUsageWithPrecision") or ft.get("currentUsage", 0)
+
+    bonuses_total = 0
+    bonuses_current = 0
+    if credit_usage and credit_usage.get("bonuses"):
+        for b in credit_usage["bonuses"]:
+            if b.get("status") == "ACTIVE":
+                bonuses_total += b.get("usageLimitWithPrecision") or b.get("usageLimit", 0)
+                bonuses_current += b.get("currentUsageWithPrecision") or b.get("currentUsage", 0)
+
+    total_limit = base_limit + free_trial_limit + bonuses_total
+    total_current = base_current + free_trial_current + bonuses_current
+
+    next_reset_date = usage_data.get("nextDateReset")
+    days_remaining = None
+    if next_reset_date:
+        try:
+            reset_time = datetime.fromisoformat(next_reset_date.replace("Z", "+00:00"))
+            days_remaining = max(0, int((reset_time.timestamp() - time.time()) / 86400)) + 1
+        except Exception:
+            pass
+
+    return {
+        "email": usage_data.get("userInfo", {}).get("email"),
+        "status": user_status,
+        "subscription": {
+            "type": subscription_type,
+            "title": subscription_title,
+        },
+        "usage": {
+            "current": total_current,
+            "limit": total_limit,
+            "percent": round(total_current / total_limit * 100, 1) if total_limit > 0 else 0,
+            "nextResetDate": next_reset_date,
+            "daysRemaining": days_remaining,
+        },
+        "lastUpdated": int(time.time() * 1000),
+    }
+
+
+@router.get("/user/api/tokens/{token_id}/account-info", include_in_schema=False)
+async def user_get_token_account_info(
+    request: Request,
+    token_id: int,
+):
+    """查询 token 对应账户的余额和订阅信息，结果缓存到数据库。"""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    from kiro_gateway.database import user_db
+    token = user_db.get_token_by_id(token_id)
+    if not token or token.user_id != user.id:
+        return JSONResponse(status_code=404, content={"error": "Token 不存在"})
+
+    creds = user_db.get_token_credentials(token_id)
+    if not creds or not creds.get("refresh_token"):
+        return JSONResponse(status_code=400, content={"error": "无法获取凭证"})
+
+    from kiro_gateway.auth import KiroAuthManager
+    from kiro_gateway.config import settings as cfg
+    try:
+        auth_manager = KiroAuthManager(
+            refresh_token=creds["refresh_token"],
+            client_id=creds.get("client_id"),
+            client_secret=creds.get("client_secret"),
+            region=creds.get("region", "us-east-1"),
+            profile_arn=cfg.profile_arn,
+        )
+        access_token = await auth_manager.get_access_token()
+        account_info = await _get_kiro_account_info(access_token)
+
+        # 缓存到数据库
+        user_db.update_token_account_info(
+            token_id=token_id,
+            email=account_info.get("email"),
+            subscription=account_info["subscription"]["type"],
+            usage_current=account_info["usage"]["current"],
+            usage_limit=account_info["usage"]["limit"],
+        )
+        return account_info
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except Exception as e:
+        logger.warning(f"查询账户信息失败: token_id={token_id}, err={e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @router.post("/user/api/tokens/refresh", include_in_schema=False)
@@ -3567,3 +3795,243 @@ async def get_public_tokens():
         ],
         "count": len(tokens)
     }
+
+
+# ==================== Custom API Accounts (User) ====================
+
+@router.get("/user/api/custom-apis", include_in_schema=False)
+async def user_get_custom_apis(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """Get current user's custom API accounts (paginated, api_key masked)."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    from kiro_gateway.database import user_db
+    accounts = user_db.get_custom_api_accounts_by_user(user.id, page=page, page_size=page_size)
+    total = user_db.get_custom_api_accounts_count_by_user(user.id)
+    return {
+        "accounts": accounts,
+        "pagination": {"page": page, "page_size": page_size, "total": total},
+    }
+
+
+@router.post("/user/api/custom-apis", include_in_schema=False)
+async def user_create_custom_api(
+    request: Request,
+    _csrf: None = Depends(require_same_origin),
+):
+    """Add a custom API account."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "无效的请求体"})
+
+    api_base = (body.get("api_base") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    fmt = (body.get("format") or "").strip()
+    name = (body.get("name") or "").strip() or None
+    provider = (body.get("provider") or "").strip() or None
+    model = (body.get("model") or "").strip() or None
+
+    # Validate required fields
+    if not api_base:
+        return JSONResponse(status_code=422, content={"error": "api_base 不能为空"})
+    if not api_key:
+        return JSONResponse(status_code=422, content={"error": "api_key 不能为空"})
+    if fmt not in ("openai", "claude"):
+        return JSONResponse(status_code=422, content={"error": "format 必须为 openai 或 claude"})
+
+    # Validate api_base is a valid HTTP/HTTPS URL
+    import re
+    if not re.match(r'^https?://', api_base):
+        return JSONResponse(status_code=422, content={"error": "api_base 必须是合法的 HTTP/HTTPS URL"})
+
+    from kiro_gateway.database import user_db
+    account_id = user_db.add_custom_api_account(
+        user_id=user.id,
+        name=name,
+        api_base=api_base,
+        api_key=api_key,
+        format=fmt,
+        provider=provider,
+        model=model,
+    )
+    return {"success": True, "id": account_id}
+
+
+@router.put("/user/api/custom-apis/{account_id}", include_in_schema=False)
+async def user_update_custom_api(
+    request: Request,
+    account_id: int,
+    _csrf: None = Depends(require_same_origin),
+):
+    """Update a custom API account (must belong to current user)."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "无效的请求体"})
+
+    import re
+
+    api_base = body.get("api_base")
+    if api_base is not None:
+        api_base = api_base.strip() or None
+    api_key = body.get("api_key")
+    if api_key is not None:
+        api_key = api_key  # preserve empty string (means "don't update")
+    fmt = body.get("format")
+    if fmt is not None:
+        fmt = fmt.strip() or None
+    name_val = body.get("name")
+    name_val = (name_val.strip() if name_val else None) or None
+    provider = body.get("provider")
+    provider = (provider.strip() if provider else None) or None
+    model = body.get("model")
+    model = (model.strip() if model else None) or None
+
+    # Validate api_base when provided
+    if api_base is not None and not re.match(r'^https?://', api_base):
+        return JSONResponse(status_code=422, content={"error": "api_base 必须是合法的 HTTP/HTTPS URL"})
+
+    # Validate format when provided
+    if fmt is not None and fmt not in ("openai", "claude"):
+        return JSONResponse(status_code=422, content={"error": "format 必须为 openai 或 claude"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.update_custom_api_account(
+        account_id=account_id,
+        user_id=user.id,
+        name=name_val,
+        api_base=api_base,
+        api_key=api_key,
+        format=fmt,
+        provider=provider,
+        model=model,
+    )
+    if not success:
+        return JSONResponse(status_code=404, content={"error": "账号不存在"})
+    return {"success": True}
+
+
+@router.patch("/user/api/custom-apis/{account_id}/status", include_in_schema=False)
+async def user_update_custom_api_status(
+    request: Request,
+    account_id: int,
+    _csrf: None = Depends(require_same_origin),
+):
+    """Enable or disable a custom API account (must belong to current user)."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "无效的请求体"})
+
+    status = (body.get("status") or "").strip()
+    if status not in ("active", "disabled"):
+        return JSONResponse(status_code=422, content={"error": "status 必须为 active 或 disabled"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.update_custom_api_account_status(account_id, user.id, status)
+    if not success:
+        return JSONResponse(status_code=404, content={"error": "账号不存在"})
+    return {"success": True}
+
+
+@router.delete("/user/api/custom-apis/{account_id}", include_in_schema=False)
+async def user_delete_custom_api(
+    request: Request,
+    account_id: int,
+    _csrf: None = Depends(require_same_origin),
+):
+    """Delete a custom API account (must belong to current user)."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.delete_custom_api_account(account_id, user.id)
+    if not success:
+        return JSONResponse(status_code=404, content={"error": "账号不存在"})
+    return {"success": True}
+
+
+# ==================== Custom API Accounts (Admin) ====================
+
+@router.get("/admin/api/custom-apis", include_in_schema=False)
+async def admin_get_custom_apis(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """Admin: get all custom API accounts (paginated, includes username)."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+
+    from kiro_gateway.database import user_db
+    accounts = user_db.admin_get_all_custom_api_accounts(page=page, page_size=page_size)
+    total = user_db.admin_get_all_custom_api_accounts_count()
+    return {
+        "accounts": accounts,
+        "pagination": {"page": page, "page_size": page_size, "total": total},
+    }
+
+
+@router.delete("/admin/api/custom-apis/{account_id}", include_in_schema=False)
+async def admin_delete_custom_api(
+    request: Request,
+    account_id: int,
+    _csrf: None = Depends(require_same_origin),
+):
+    """Admin: delete any custom API account."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.admin_delete_custom_api_account(account_id)
+    if not success:
+        return JSONResponse(status_code=404, content={"error": "账号不存在"})
+    return {"success": True}
+
+
+@router.patch("/admin/api/custom-apis/{account_id}/status", include_in_schema=False)
+async def admin_update_custom_api_status(
+    request: Request,
+    account_id: int,
+    _csrf: None = Depends(require_same_origin),
+):
+    """Admin: enable or disable any custom API account."""
+    session = request.cookies.get("admin_session")
+    if not verify_admin_session(session):
+        return JSONResponse(status_code=401, content={"error": "未授权"})
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "无效的请求体"})
+
+    status = (body.get("status") or "").strip()
+    if status not in ("active", "disabled"):
+        return JSONResponse(status_code=422, content={"error": "status 必须为 active 或 disabled"})
+
+    from kiro_gateway.database import user_db
+    success = user_db.admin_update_custom_api_account_status(account_id, status)
+    if not success:
+        return JSONResponse(status_code=404, content={"error": "账号不存在"})
+    return {"success": True}

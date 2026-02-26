@@ -404,6 +404,14 @@ class AnthropicResponseContentBlock(BaseModel):
     thinking: Optional[str] = None
 
 
+class TextContent(BaseModel):
+    """Simple text content block (alias for convenience)."""
+    type: str = "text"
+    text: str = ""
+
+    model_config = {"extra": "allow"}
+
+
 class AnthropicMessagesResponse(BaseModel):
     """
     Anthropic Messages API 响应。
