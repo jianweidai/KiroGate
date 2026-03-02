@@ -734,7 +734,8 @@ class RequestHandler:
                 openai_request,
                 conversation_id,
                 profile_arn,
-                thinking_enabled=thinking_enabled
+                thinking_enabled=thinking_enabled,
+                thinking_param=thinking_param
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

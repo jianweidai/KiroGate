@@ -551,16 +551,39 @@ async def handle_websearch_request(
     tool_use_id, mcp_request = create_mcp_request(query)
     logger.debug(f"MCP request: {json.dumps(mcp_request, ensure_ascii=False)}")
     
-    # 3. 调用 Kiro MCP API
+    # 3. 调用 Kiro MCP API — 需要先做延迟 Token 选择（用户 API Key 模式）
+    needs_token_selection = getattr(request.state, 'needs_token_selection', False)
+    user_id = getattr(request.state, 'user_id', None)
+    if needs_token_selection and user_id:
+        from kiro_gateway.token_allocator import token_allocator, NoTokenAvailable
+        try:
+            account_type, account_data, selected_auth = await token_allocator.get_best_token(
+                user_id=user_id,
+                model=request_data.model
+            )
+        except NoTokenAvailable:
+            logger.warning(f"Web Search: 用户 {user_id} 无可用 Token")
+            async def no_token_stream():
+                if response_format == "anthropic":
+                    event = {"type": "error", "error": {"type": "api_error", "message": "该用户暂无可用的 Token"}}
+                    yield f"event: error\ndata: {json.dumps(event)}\n\n"
+                else:
+                    yield "data: [DONE]\n\n"
+            return StreamingResponse(no_token_stream(), media_type="text/event-stream")
+        if account_type != 'custom_api':
+            request.state.auth_manager = selected_auth
+
     auth_manager = getattr(request.state, 'auth_manager', None) or request.app.state.auth_manager
     
     try:
-        # 使用 auth_manager 的 q_host 和 headers
-        mcp_url = f"{auth_manager.q_host}/mcp"
-        headers = {
-            "Authorization": f"Bearer {auth_manager.access_token}",
-            "Content-Type": "application/json"
-        }
+        # 使用 auth_manager 的 api_host（与 generateAssistantResponse 相同的域名）
+        # 注意：kiro.rs 用 q.{region}.amazonaws.com，但 KiroGate 的 api_host 是
+        # codewhisperer.us-east-1.amazonaws.com，两者指向同一服务，用 api_host 确保网络可达
+        mcp_url = f"{auth_manager.api_host}/mcp"
+        logger.info(f"MCP URL: {mcp_url}")
+        token = await auth_manager.get_access_token()
+        from kiro_gateway.utils import get_kiro_headers
+        headers = get_kiro_headers(auth_manager, token)
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(mcp_url, json=mcp_request, headers=headers)
@@ -574,7 +597,8 @@ async def handle_websearch_request(
             logger.debug(f"MCP response: {json.dumps(mcp_response, ensure_ascii=False)[:500]}")
     
     except Exception as e:
-        logger.error(f"Failed to call MCP API: {e}")
+        error_msg = str(e) or repr(e)
+        logger.error(f"Failed to call MCP API: {error_msg}", exc_info=True)
         # 返回错误响应
         async def error_stream():
             if response_format == "anthropic":
@@ -582,7 +606,7 @@ async def handle_websearch_request(
                     "type": "error",
                     "error": {
                         "type": "api_error",
-                        "message": f"Failed to perform web search: {str(e)}"
+                        "message": f"Failed to perform web search: {error_msg}"
                     }
                 }
                 yield f"event: error\ndata: {json.dumps(error_event)}\n\n"

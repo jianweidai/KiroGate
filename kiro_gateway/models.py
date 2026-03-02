@@ -323,14 +323,22 @@ class AnthropicTool(BaseModel):
     """
     Anthropic 格式的工具。
 
+    支持两种格式：
+    1. 普通工具：{ name, description, input_schema }
+    2. WebSearch 工具：{ type: "web_search_20250305", name: "web_search", max_uses: 8 }
+
     Attributes:
         name: 工具名称
         description: 工具描述
-        input_schema: 输入参数的 JSON Schema
+        input_schema: 输入参数的 JSON Schema（WebSearch 工具无此字段）
+        type: 工具类型（仅 WebSearch 工具）
+        max_uses: 最大使用次数（仅 WebSearch 工具）
     """
-    name: str
+    name: str = ""
     description: Optional[str] = None
-    input_schema: Dict[str, Any]
+    input_schema: Optional[Dict[str, Any]] = None
+    type: Optional[str] = None
+    max_uses: Optional[int] = None
 
     model_config = {"extra": "allow"}
 

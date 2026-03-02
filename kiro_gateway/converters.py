@@ -46,19 +46,65 @@ from kiro_gateway.models import (
 
 
 # ==================================================================================================
-# Extended Thinking 相关常量
+# Extended Thinking & System Prompt 相关常量
 # ==================================================================================================
 
-# Thinking 提示词 - 温和的提示，鼓励但不强制思考
-# 使用重复的 XML 标签增强效果，参考 amq2api 实现
-THINKING_HINT = "<thinking_mode>interleaved</thinking_mode><max_thinking_length>16000</max_thinking_length><thinking_mode>interleaved</thinking_mode><max_thinking_length>16000</max_thinking_length>"
+# 追加到系统提示词的分块写入策略（对齐 kiro.rs）
+SYSTEM_CHUNKED_POLICY = (
+    "When the Write or Edit tool has content size limits, always comply silently. "
+    "Never suggest bypassing these limits via alternative tools. "
+    "Never ask the user whether to switch approaches. "
+    "Complete all chunked operations without commentary."
+)
 
-# Thinking System Prompt - 温和的提示而非强制指令
-THINKING_SYSTEM_PROMPT = """When appropriate, you can use <thinking> tags to show your reasoning process before providing the final answer. This is optional and should be used when the question requires careful analysis."""
+# 系统提示词注入到 history 时的 assistant 回复
+SYSTEM_PROMPT_ACK = "I will follow these instructions."
 
-# Thinking 标签
-THINKING_START_TAG = "<thinking>"
-THINKING_END_TAG = "</thinking>"
+# 默认 thinking budget tokens 上限
+DEFAULT_BUDGET_TOKENS = 16000
+MAX_BUDGET_TOKENS = 24576
+
+
+def _generate_thinking_prefix(thinking_param: Any) -> Optional[str]:
+    """
+    根据 thinking 参数生成 thinking XML 前缀标签，对齐 kiro.rs 的 generate_thinking_prefix。
+
+    Args:
+        thinking_param: thinking 参数（None、bool 或 dict）
+
+    Returns:
+        thinking XML 标签字符串，或 None（不启用 thinking 时）
+    """
+    def _enabled_tag(budget: int) -> str:
+        return f"<thinking_mode>enabled</thinking_mode><max_thinking_length>{budget}</max_thinking_length>"
+
+    if thinking_param is None:
+        return _enabled_tag(DEFAULT_BUDGET_TOKENS)
+
+    if isinstance(thinking_param, bool):
+        return _enabled_tag(DEFAULT_BUDGET_TOKENS) if thinking_param else None
+
+    if isinstance(thinking_param, dict):
+        thinking_type = thinking_param.get("type", "enabled")
+
+        if thinking_type == "disabled":
+            return None
+
+        if thinking_type == "adaptive":
+            effort = thinking_param.get("effort", "high")
+            return f"<thinking_mode>adaptive</thinking_mode><thinking_effort>{effort}</thinking_effort>"
+
+        # enabled 或其他值
+        budget = min(thinking_param.get("budget_tokens", DEFAULT_BUDGET_TOKENS), MAX_BUDGET_TOKENS)
+        return _enabled_tag(budget)
+
+    # 未知类型，默认启用
+    return _enabled_tag(DEFAULT_BUDGET_TOKENS)
+
+
+def _has_thinking_tags(content: str) -> bool:
+    """检查内容中是否已包含 thinking 标签。"""
+    return "<thinking_mode>" in content
 
 
 def extract_text_content(content: Any) -> str:
@@ -490,86 +536,104 @@ def build_kiro_payload(
     request_data: ChatCompletionRequest,
     conversation_id: str,
     profile_arn: str,
-    thinking_enabled: bool = True
+    thinking_enabled: bool = True,
+    thinking_param: Any = None
 ) -> dict:
     """
     构建 Kiro API 的完整 payload。
-    
-    包括：
-    - 完整的消息历史
-    - System prompt（添加到第一个 user 消息）
-    - Tools 定义（处理长描述）
-    - 当前消息
-    - Extended Thinking 支持（通过 THINKING_HINT 注入）
-    
-    如果 tools 包含过长的 descriptions，会自动转移到 system prompt，
-    而在 tool 中保留引用。
-    
+
+    系统提示词处理方式对齐 kiro.rs：
+    - 系统提示词作为 history 开头的 user/assistant 对注入
+    - thinking 标签注入到系统消息最前面
+    - currentMessage 保持纯粹的用户输入
+
     Args:
         request_data: OpenAI 格式的请求
         conversation_id: 会话唯一 ID
         profile_arn: AWS CodeWhisperer profile ARN
         thinking_enabled: 是否启用 Extended Thinking 模式（默认 True）
-    
+        thinking_param: 原始 thinking 参数（用于生成精确的 thinking 标签）
+
     Returns:
         Kiro API POST 请求的 payload 字典
-    
+
     Raises:
         ValueError: 如果没有可发送的消息
     """
     messages = list(request_data.messages)
 
-    # 使用辅助函数提取 system prompt 和处理 tools（代码简化）
+    # 提取 system prompt 和处理 tools
     system_prompt, non_system_messages, processed_tools = _extract_system_and_tool_docs(
         messages, request_data.tools
     )
-    
-    # thinking_instruction 不注入 system_prompt，避免膨胀历史消息
-    # 后续单独追加到当前消息末尾（参考 amq2api 实现）
 
-    # Объединяем соседние сообщения с одинаковой ролью
+    # 合并相邻同角色消息
     merged_messages = merge_adjacent_messages(non_system_messages)
-    
+
     if not merged_messages:
         logger.error("[build_kiro_payload] 错误：没有可发送的消息")
         raise ValueError("没有可发送的消息")
-    
-    # Получаем внутренний ID модели
+
     model_id = get_internal_model_id(request_data.model)
-    
-    # Строим историю (все сообщения кроме последнего)
+
+    # 构建常规历史消息（不含最后一条）
     history_messages = merged_messages[:-1] if len(merged_messages) > 1 else []
-    
     history = build_kiro_history(history_messages, model_id)
-    
-    # Текущее сообщение (последнее)
+
+    # ========================================================================
+    # 系统提示词注入到 history 开头（对齐 kiro.rs 的 build_history）
+    # ========================================================================
+    thinking_prefix = _generate_thinking_prefix(thinking_param) if thinking_enabled else None
+    system_history = []
+
+    # 确定系统消息内容
+    system_content = None
+    if system_prompt:
+        system_content = f"{system_prompt}\n{SYSTEM_CHUNKED_POLICY}"
+        # 注入 thinking 标签到系统消息最前面（如果需要且不存在）
+        if thinking_prefix and not _has_thinking_tags(system_content):
+            system_content = f"{thinking_prefix}\n{system_content}"
+    elif thinking_prefix:
+        # 没有系统消息但有 thinking 配置，单独插入 thinking 标签
+        system_content = thinking_prefix
+
+    if system_content:
+        system_history = [
+            {
+                "userInputMessage": {
+                    "content": system_content,
+                    "modelId": model_id,
+                    "origin": "AI_EDITOR",
+                }
+            },
+            {
+                "assistantResponseMessage": {
+                    "content": SYSTEM_PROMPT_ACK
+                }
+            },
+        ]
+
+    # 系统提示词 history 放在最前面
+    history = system_history + history
+
+    # ========================================================================
+    # 构建 currentMessage（纯粹的用户输入，不再拼接系统提示词）
+    # ========================================================================
     current_message = merged_messages[-1]
     current_content = extract_text_content(current_message.content)
-    
-    # System prompt 只注入到当前消息（最后一条），避免历史消息因叠加 system prompt 而超长
-    if system_prompt:
-        current_content = f"{system_prompt}\n\n{current_content}"
-    
-    # Если текущее сообщение - assistant, нужно добавить его в историю
-    # и создать user сообщение "Continue"
+
+    # 如果最后一条是 assistant，放入 history，用 "Continue" 作为当前消息
     if current_message.role == "assistant":
         history.append({
             "assistantResponseMessage": {
                 "content": current_content
             }
         })
-        # 使用 "Continue" 让模型继续生成
-        # 注意：Kiro API 不接受空的 content
-        current_content = "Continue"
-    
-    # 如果内容为空，使用 "Continue"
-    if not current_content:
         current_content = "Continue"
 
-    # THINKING_HINT 追加到当前消息末尾（参考 amq2api 实现）
-    # 不注入 system_prompt，避免膨胀历史消息
-    if thinking_enabled:
-        current_content = f"{current_content}\n{THINKING_HINT}"
+    # 空内容兜底
+    if not current_content:
+        current_content = "Continue"
 
     # 构建 userInputMessage
     user_input_message = {
@@ -577,14 +641,13 @@ def build_kiro_payload(
         "modelId": model_id,
         "origin": "AI_EDITOR",
     }
-    
-    # Добавляем tools и tool_results если есть
-    # Используем обработанные tools (с короткими descriptions)
+
+    # 添加 tools 和 tool_results
     user_input_context = _build_user_input_context(request_data, current_message, processed_tools)
     if user_input_context:
         user_input_message["userInputMessageContext"] = user_input_context
-    
-    # Собираем финальный payload
+
+    # 组装 payload
     payload = {
         "conversationState": {
             "chatTriggerType": "MANUAL",
@@ -594,15 +657,13 @@ def build_kiro_payload(
             }
         }
     }
-    
-    # Добавляем историю только если она не пуста
+
     if history:
         payload["conversationState"]["history"] = history
-    
-    # Добавляем profileArn
+
     if profile_arn:
         payload["profileArn"] = profile_arn
-    
+
     return payload
 
 
@@ -706,6 +767,7 @@ def convert_anthropic_tools_to_openai(tools: Optional[List[AnthropicTool]]) -> O
 
     Anthropic использует input_schema, OpenAI использует parameters.
     同时对 input_schema 进行规范化，修复 MCP 工具定义中的类型问题。
+    WebSearch 工具（type 以 "web_search" 开头）会被跳过，因为它们不是普通函数工具。
 
     Args:
         tools: Список инструментов в формате Anthropic
@@ -718,7 +780,11 @@ def convert_anthropic_tools_to_openai(tools: Optional[List[AnthropicTool]]) -> O
 
     openai_tools = []
     for tool in tools:
-        normalized_schema = _normalize_json_schema(tool.input_schema)
+        # 跳过 WebSearch 等非函数工具（对齐 kiro.rs 的 Tool::is_web_search）
+        if tool.type and tool.type.startswith("web_search"):
+            continue
+
+        normalized_schema = _normalize_json_schema(tool.input_schema or {})
         openai_tool = Tool(
             type="function",
             function=ToolFunction(
@@ -729,7 +795,7 @@ def convert_anthropic_tools_to_openai(tools: Optional[List[AnthropicTool]]) -> O
         )
         openai_tools.append(openai_tool)
 
-    return openai_tools
+    return openai_tools if openai_tools else None
 
 
 def _extract_anthropic_system_prompt(system: Optional[Any]) -> str:
