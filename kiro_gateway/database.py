@@ -952,6 +952,57 @@ class UserDatabase:
                 logger.info(f"设置 Token {token_id} opus_enabled={opus_enabled}, 影响行数={cursor.rowcount}")
                 return cursor.rowcount > 0
 
+    def update_token_credentials(
+        self,
+        token_id: int,
+        refresh_token: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        region: Optional[str] = None,
+    ) -> bool:
+        """
+        更新 token 的凭证信息。
+        
+        只更新传入的非 None 字段。更新后重置状态为 active。
+        """
+        updates = []
+        params = []
+        
+        if refresh_token is not None:
+            encrypted = self._encrypt_token(refresh_token)
+            token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()[:16]
+            updates.append("refresh_token_encrypted = ?")
+            params.append(encrypted)
+            updates.append("token_hash = ?")
+            params.append(token_hash)
+        
+        if client_id is not None:
+            updates.append("client_id_encrypted = ?")
+            params.append(self._encrypt_token(client_id) if client_id else None)
+        
+        if client_secret is not None:
+            updates.append("client_secret_encrypted = ?")
+            params.append(self._encrypt_token(client_secret) if client_secret else None)
+        
+        if region is not None:
+            updates.append("region = ?")
+            params.append(region)
+        
+        if not updates:
+            return False
+        
+        # 更新凭证后重置状态
+        updates.append("status = 'active'")
+        
+        params.append(token_id)
+        sql = f"UPDATE tokens SET {', '.join(updates)} WHERE id = ?"
+        
+        with self._lock:
+            with self._get_conn() as conn:
+                cursor = conn.execute(sql, params)
+                logger.info(f"更新 Token {token_id} 凭证, 影响行数={cursor.rowcount}")
+                return cursor.rowcount > 0
+
     def get_opus_enabled_tokens(self, user_id: Optional[int] = None) -> List[DonatedToken]:
         """Get all active tokens with opus_enabled=True."""
         with self._get_conn() as conn:

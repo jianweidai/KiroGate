@@ -2641,6 +2641,26 @@ async def user_test_token(
         else:
              return {"success": False, "error": "Unexpected response type"}
 
+    except HTTPException as e:
+        # process_request 会把底层错误包装成 HTTPException
+        # 尝试从 detail 中提取有用信息
+        logger.error(f"Test token failed: HTTP {e.status_code}, detail: {e.detail}")
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"error": f"测试失败: {e.detail}"}
+        )
+    except httpx.HTTPStatusError as e:
+        # 直接的 HTTP 错误（如 token 刷新失败）
+        try:
+            error_body = e.response.json()
+            error_detail = error_body.get("error_description", error_body.get("error", str(error_body)))
+        except Exception:
+            error_detail = e.response.text[:200] if e.response.text else str(e)
+        logger.error(f"Test token failed: HTTP {e.response.status_code}, detail: {error_detail}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Token 刷新失败: {error_detail}"}
+        )
     except Exception as e:
         logger.error(f"Test token failed: {e}")
         return JSONResponse(status_code=500, content={"error": f"测试失败: {str(e)}"})
@@ -2702,6 +2722,7 @@ async def user_get_tokens(
             {
                 "id": t.id,
                 "region": t.region,
+                "auth_type": t.auth_type,
                 "visibility": t.visibility,
                 "status": t.status,
                 "success_count": t.success_count,
@@ -3634,6 +3655,57 @@ async def user_update_token_opus(
         return JSONResponse(status_code=404, content={"error": "Token 不存在"})
 
     success = user_db.set_token_opus_enabled(token_id, opus_enabled)
+    return {"success": success}
+
+
+@router.put("/user/api/tokens/{token_id}/credentials", include_in_schema=False)
+async def user_update_token_credentials(
+    request: Request,
+    token_id: int,
+    refresh_token: str = Form(""),
+    client_id: str = Form(""),
+    client_secret: str = Form(""),
+    region: str = Form(""),
+    _csrf: None = Depends(require_same_origin)
+):
+    """Update token credentials (refresh_token, client_id, client_secret, region)."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse(status_code=401, content={"error": "未登录"})
+
+    from kiro_gateway.database import user_db
+
+    token = user_db.get_token_by_id(token_id)
+    if not token or (token.user_id != user.id and not user.is_admin):
+        return JSONResponse(status_code=404, content={"error": "Token 不存在或无权限"})
+
+    # 只更新非空字段
+    refresh_token = refresh_token.strip() or None
+    client_id = client_id.strip() or None
+    client_secret = client_secret.strip() or None
+    region = region.strip() or None
+
+    if region and region not in SUPPORTED_REGIONS:
+        return JSONResponse(status_code=400, content={"error": f"不支持的区域: {region}"})
+
+    if not any([refresh_token, client_id, client_secret, region]):
+        return JSONResponse(status_code=400, content={"error": "至少需要提供一个要更新的字段"})
+
+    # 清除旧的 auth 缓存
+    old_creds = user_db.get_token_credentials(token_id)
+    if old_creds:
+        await auth_cache.remove(
+            old_creds["refresh_token"],
+            region=old_creds.get("region", "us-east-1")
+        )
+
+    success = user_db.update_token_credentials(
+        token_id,
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
+        region=region,
+    )
     return {"success": success}
 
 

@@ -28,6 +28,8 @@ import json
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
+import httpx
+
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
@@ -892,7 +894,15 @@ class RequestHandler:
             if debug_logger:
                 debug_logger.flush_on_error(500, error_msg)
             if settings.debug_mode == "off":
-                detail = "服务器内部错误"
+                # 对认证/token 刷新错误保留关键信息，方便用户排查
+                if isinstance(e, httpx.HTTPStatusError) and "oidc" in str(e.request.url).lower():
+                    try:
+                        body = e.response.json()
+                        detail = f"Token 刷新失败: {body.get('error_description', body.get('error', 'unknown'))}"
+                    except Exception:
+                        detail = f"Token 刷新失败: HTTP {e.response.status_code}"
+                else:
+                    detail = "服务器内部错误"
             else:
                 detail = f"服务器内部错误: {error_msg}"
             raise HTTPException(status_code=500, detail=detail)

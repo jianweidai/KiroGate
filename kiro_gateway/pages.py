@@ -4695,6 +4695,41 @@ def render_user_page(user) -> str:
       </div>
     </div>
   </div>
+  <!-- Token 编辑弹窗 -->
+  <div id="editTokenModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
+    <div class="card w-full max-w-md mx-4" style="max-height: 90vh; overflow-y: auto;">
+      <h3 class="text-lg font-bold mb-4">✏️ 编辑 Token</h3>
+      <input type="hidden" id="editTokenId">
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">Refresh Token <span style="color: var(--text-muted);">（留空则不修改）</span></label>
+        <textarea id="editTokenRefreshToken" class="w-full h-20 p-3 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border);" placeholder="粘贴新的 Refresh Token"></textarea>
+      </div>
+      <div id="editTokenIdcFields">
+        <div class="mb-3">
+          <label class="text-sm font-medium mb-1 block">Client ID <span style="color: var(--text-muted);">（留空则不修改）</span></label>
+          <input id="editTokenClientId" type="text" placeholder="IDC 模式的 Client ID" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+        </div>
+        <div class="mb-3">
+          <label class="text-sm font-medium mb-1 block">Client Secret <span style="color: var(--text-muted);">（留空则不修改）</span></label>
+          <input id="editTokenClientSecret" type="password" placeholder="IDC 模式的 Client Secret" class="w-full rounded px-3 py-2 text-sm" style="background: var(--bg-input); border: 1px solid var(--border); color: var(--text);">
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="text-sm font-medium mb-1 block">🌍 AWS 区域</label>
+        <select id="editTokenRegion" class="w-full px-3 py-2 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border);">
+          <option value="">不修改</option>
+          <option value="us-east-1">us-east-1 (美国东部)</option>
+          <option value="ap-southeast-1">ap-southeast-1 (新加坡)</option>
+          <option value="eu-west-1">eu-west-1 (爱尔兰)</option>
+        </select>
+      </div>
+      <p id="editTokenError" class="text-sm text-red-400 mb-3" style="display: none;"></p>
+      <div class="flex justify-end gap-2">
+        <button onclick="hideEditTokenModal()" class="px-4 py-2 rounded-lg text-sm" style="background: var(--bg-input); border: 1px solid var(--border);">取消</button>
+        <button onclick="submitEditToken()" class="btn-primary text-sm">保存</button>
+      </div>
+    </div>
+  </div>
   <!-- 自定义确认对话框 -->
   <div id="confirmModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" style="display: none;">
     <div class="card w-full max-w-sm mx-4 text-center">
@@ -5309,6 +5344,7 @@ def render_user_page(user) -> str:
               <button onclick="testToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 mr-1">测试</button>
               <button onclick="queryAccountInfo(${{t.id}})" class="text-xs px-2 py-1 rounded bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 mr-1">余额</button>
               <button onclick="toggleOpus(${{t.id}}, ${{!opusEnabled}})" class="text-xs px-2 py-1 rounded ${{opusBtnClass}} hover:opacity-80 mr-1" title="标记为 Pro+ 账号（支持 Opus 4.5/4.6、Sonnet 4.6 模型）">${{opusBtnText}}</button>
+              <button onclick="showEditTokenModal(${{t.id}}, '${{region}}', '${{t.auth_type || 'social'}}')" class="text-xs px-2 py-1 rounded bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 mr-1">编辑</button>
               <button onclick="deleteToken(${{t.id}})" class="text-xs px-2 py-1 rounded bg-red-500/20 text-red-400">删除</button>
             </td>
           </tr>
@@ -5903,6 +5939,66 @@ def render_user_page(user) -> str:
       }} catch (e) {{
         console.error(e);
         alert('请求失败');
+      }}
+    }}
+
+    function showEditTokenModal(tokenId, region, authType) {{
+      document.getElementById('editTokenId').value = tokenId;
+      document.getElementById('editTokenRefreshToken').value = '';
+      document.getElementById('editTokenClientId').value = '';
+      document.getElementById('editTokenClientSecret').value = '';
+      document.getElementById('editTokenRegion').value = '';
+      document.getElementById('editTokenError').style.display = 'none';
+      // IDC 模式显示 client_id/client_secret 字段
+      document.getElementById('editTokenIdcFields').style.display = authType === 'idc' ? 'block' : 'none';
+      document.getElementById('editTokenModal').style.display = 'flex';
+    }}
+
+    function hideEditTokenModal() {{
+      document.getElementById('editTokenModal').style.display = 'none';
+    }}
+
+    async function submitEditToken() {{
+      const tokenId = document.getElementById('editTokenId').value;
+      const refreshToken = document.getElementById('editTokenRefreshToken').value.trim();
+      const clientId = document.getElementById('editTokenClientId').value.trim();
+      const clientSecret = document.getElementById('editTokenClientSecret').value.trim();
+      const region = document.getElementById('editTokenRegion').value;
+      const errEl = document.getElementById('editTokenError');
+
+      if (!refreshToken && !clientId && !clientSecret && !region) {{
+        errEl.textContent = '请至少填写一个要修改的字段';
+        errEl.style.display = 'block';
+        return;
+      }}
+
+      const fd = new FormData();
+      if (refreshToken) fd.append('refresh_token', refreshToken);
+      if (clientId) fd.append('client_id', clientId);
+      if (clientSecret) fd.append('client_secret', clientSecret);
+      if (region) fd.append('region', region);
+
+      try {{
+        const r = await fetch('/user/api/tokens/' + tokenId + '/credentials', {{ method: 'PUT', body: fd }});
+        const d = await r.json();
+        if (r.ok && d.success) {{
+          hideEditTokenModal();
+          showConfirmModal({{
+            title: '更新成功',
+            message: 'Token 凭证已更新，状态已重置为有效。',
+            icon: '✅',
+            confirmText: '好的',
+            danger: false
+          }});
+          loadTokens();
+        }} else {{
+          errEl.textContent = d.error || '更新失败';
+          errEl.style.display = 'block';
+        }}
+      }} catch (e) {{
+        console.error(e);
+        errEl.textContent = '请求失败: ' + e.message;
+        errEl.style.display = 'block';
       }}
     }}
 

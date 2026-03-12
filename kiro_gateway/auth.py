@@ -436,6 +436,15 @@ class KiroAuthManager:
                     )
                     await asyncio.sleep(delay)
                 else:
+                    # 记录客户端错误的详细响应体（如 400、401、403 等）
+                    try:
+                        error_body = e.response.text
+                    except Exception:
+                        error_body = "(无法读取响应体)"
+                    logger.error(
+                        f"Token 刷新失败: HTTP {e.response.status_code}, "
+                        f"URL: {url}, 响应: {error_body[:500]}"
+                    )
                     raise
             except (httpx.ConnectError, httpx.TimeoutException) as e:
                 last_error = e
