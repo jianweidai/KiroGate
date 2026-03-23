@@ -65,6 +65,69 @@ DEFAULT_BUDGET_TOKENS = 16000
 MAX_BUDGET_TOKENS = 24576
 
 
+# ==================================================================================================
+# 图片处理
+# ==================================================================================================
+
+def extract_images_from_anthropic_content(content: Any) -> Optional[List[Dict[str, Any]]]:
+    """
+    从 Anthropic 内容块中提取图片并转换为 Amazon Q 格式。
+
+    Claude 格式:
+    {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "base64_encoded_data"
+        }
+    }
+
+    Amazon Q 格式:
+    {
+        "format": "png",
+        "source": {
+            "bytes": "base64_encoded_data"
+        }
+    }
+
+    Args:
+        content: Anthropic 消息的 content 字段（字符串或列表）
+
+    Returns:
+        Amazon Q 格式的图片列表，如果没有图片则返回 None
+    """
+    if not isinstance(content, list):
+        return None
+
+    images = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image":
+            source = block.get("source", {})
+            if source.get("type") == "base64":
+                media_type = source.get("media_type", "image/png")
+                image_format = media_type.split("/")[-1] if "/" in media_type else "png"
+                images.append({
+                    "format": image_format,
+                    "source": {
+                        "bytes": source.get("data", "")
+                    }
+                })
+        elif isinstance(block, AnthropicContentBlock) and getattr(block, 'type', None) == "image":
+            source = getattr(block, 'source', {}) or {}
+            if isinstance(source, dict) and source.get("type") == "base64":
+                media_type = source.get("media_type", "image/png")
+                image_format = media_type.split("/")[-1] if "/" in media_type else "png"
+                images.append({
+                    "format": image_format,
+                    "source": {
+                        "bytes": source.get("data", "")
+                    }
+                })
+
+    return images if images else None
+
+
 def _generate_thinking_prefix(thinking_param: Any) -> Optional[str]:
     """
     根据 thinking 参数生成 thinking XML 前缀标签，对齐 kiro.rs 的 generate_thinking_prefix。
@@ -288,6 +351,12 @@ def build_kiro_history(messages: List[ChatMessage], model_id: str) -> List[Dict[
             tool_results = _extract_tool_results(msg.content)
             if tool_results:
                 user_input["userInputMessageContext"] = {"toolResults": tool_results}
+            
+            # 添加图片（如果有）
+            images = getattr(msg, 'kiro_images', None)
+            if images:
+                user_input["images"] = images
+                logger.info(f"历史消息中包含 {len(images)} 张图片")
             
             history.append({"userInputMessage": user_input})
             
@@ -647,6 +716,12 @@ def build_kiro_payload(
     if user_input_context:
         user_input_message["userInputMessageContext"] = user_input_context
 
+    # 添加图片（如果当前消息包含图片）
+    images = getattr(current_message, 'kiro_images', None)
+    if images:
+        user_input_message["images"] = images
+        logger.info(f"当前消息中包含 {len(images)} 张图片")
+
     # 组装 payload
     payload = {
         "conversationState": {
@@ -827,7 +902,7 @@ def _extract_anthropic_system_prompt(system: Optional[Any]) -> str:
 def _convert_anthropic_content_to_openai(
     content: Any,
     role: str
-) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]], Optional[str]]:
+) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]], Optional[str], Optional[List[Dict[str, Any]]]]:
     """
     Преобразует Anthropic content в формат OpenAI.
 
@@ -836,13 +911,14 @@ def _convert_anthropic_content_to_openai(
         role: Роль сообщения (user или assistant)
 
     Returns:
-        Tuple из (text_content, tool_calls, tool_call_id)
+        Tuple из (text_content, tool_calls, tool_call_id, images)
+        images 为 Amazon Q 格式的图片列表
     """
     if isinstance(content, str):
-        return content, None, None
+        return content, None, None, None
 
     if not isinstance(content, list):
-        return str(content) if content else None, None, None
+        return str(content) if content else None, None, None, None
 
     text_parts = []
     tool_calls = []
@@ -856,13 +932,9 @@ def _convert_anthropic_content_to_openai(
                 text_parts.append(block.get("text", ""))
 
             elif block_type == "image":
-                # Image content - для Kiro нужно будет обработать отдельно
-                # Пока добавляем placeholder
-                source = block.get("source", {})
-                if source.get("type") == "base64":
-                    text_parts.append(f"[Image: {source.get('media_type', 'image')}]")
-                elif source.get("type") == "url":
-                    text_parts.append(f"[Image URL: {source.get('url', '')}]")
+                # Image content - 提取图片数据，在后续构建 Kiro payload 时使用
+                # 文本中不再添加 placeholder，图片通过 images 字段传递
+                pass
 
             elif block_type == "tool_use":
                 # Assistant's tool call
@@ -917,11 +989,14 @@ def _convert_anthropic_content_to_openai(
 
     text_content = "\n".join(text_parts) if text_parts else None
 
+    # 提取图片数据
+    images = extract_images_from_anthropic_content(content)
+
     # Если есть tool_results, возвращаем их как content (для обработки в merge_adjacent_messages)
     if tool_results:
-        return tool_results, None, None
+        return tool_results, None, None, images
 
-    return text_content, tool_calls if tool_calls else None, None
+    return text_content, tool_calls if tool_calls else None, None, images
 
 
 def _extract_tool_result_content(content: Any) -> str:
@@ -972,14 +1047,14 @@ def convert_anthropic_messages_to_openai(
 
     for msg in messages:
         role = msg.role
-        content, tool_calls, _ = _convert_anthropic_content_to_openai(msg.content, role)
+        content, tool_calls, _, images = _convert_anthropic_content_to_openai(msg.content, role)
 
         # Если content - это tool_results, создаем user сообщение с ними
         if isinstance(content, list) and content and isinstance(content[0], dict) and content[0].get("type") == "tool_result":
-            openai_messages.append(ChatMessage(
-                role="user",
-                content=content
-            ))
+            cm = ChatMessage(role="user", content=content)
+            if images:
+                cm.kiro_images = images
+            openai_messages.append(cm)
         elif role == "assistant":
             openai_messages.append(ChatMessage(
                 role="assistant",
@@ -987,10 +1062,10 @@ def convert_anthropic_messages_to_openai(
                 tool_calls=tool_calls
             ))
         else:
-            openai_messages.append(ChatMessage(
-                role="user",
-                content=content or ""
-            ))
+            cm = ChatMessage(role="user", content=content or "")
+            if images:
+                cm.kiro_images = images
+            openai_messages.append(cm)
 
     return openai_messages
 
